@@ -1,135 +1,145 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
-import os
-import sys
+import aiohttp
 import asyncio
+import os
 
 # ============================================================
-# 1. INSERIR TOKEN (via terminal ou variável de ambiente)
+# CONFIGURAÇÃO DO BOT OFICIAL
 # ============================================================
+TOKEN_BOT = os.getenv('BOT_TOKEN')  # Token do bot oficial (começa com MT...)
 
-# Opção 1: Variável de ambiente (recomendado para Railway)
-TOKEN = os.getenv('SEU_TOKEN_DE_USUARIO')
-
-# Opção 2: Input no terminal (se não tiver variável de ambiente)
-if not TOKEN:
-    TOKEN = input("🔑 Cole seu token do Discord e pressione Enter: ").strip()
-
-if not TOKEN:
-    print("❌ Token vazio. Encerrando.")
-    sys.exit(1)
-
-# ============================================================
-# 2. CONFIGURAR O BOT (self-bot)
-# ============================================================
+if not TOKEN_BOT:
+    print("❌ Defina a variável de ambiente BOT_TOKEN com o token do seu bot oficial.")
+    exit(1)
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.messages = True
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-bot = commands.Bot(command_prefix='!', self_bot=True, intents=intents)
+# Dicionário para armazenar tokens por usuário (em memória)
+user_tokens = {}
 
-# Variável para guardar o ID do canal DM alvo
-canal_alvo_id = None
+# ============================================================
+# MODAL PARA INSERIR TOKEN
+# ============================================================
+class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
+    token_input = discord.ui.TextInput(
+        label='Cole seu token de usuário aqui',
+        placeholder='Ex: NDIzNDU2Nzg5MDEyMzQ1Njc4.xyz...',
+        style=discord.TextStyle.paragraph,
+        required=True,
+        min_length=50,
+        max_length=100
+    )
 
+    async def on_submit(self, interaction: discord.Interaction):
+        token = self.token_input.value.strip()
+        # Salva o token associado ao ID do usuário
+        user_tokens[interaction.user.id] = token
+        await interaction.response.send_message(
+            f'✅ Token configurado com sucesso, {interaction.user.mention}! Agora use `/limpar_dm <ID_DO_CANAL>`.',
+            ephemeral=True
+        )
+        print(f'Token configurado para usuário {interaction.user} (ID: {interaction.user.id})')
+
+# ============================================================
+# COMANDOS SLASH
+# ============================================================
+@bot.tree.command(name='configurar', description='Configura o token do seu usuário para o bot usar')
+async def configurar(interaction: discord.Interaction):
+    """Abre um modal para inserir o token."""
+    await interaction.response.send_modal(TokenModal())
+
+@bot.tree.command(name='limpar_dm', description='Apaga suas mensagens em uma DM')
+@app_commands.describe(channel_id='ID do canal privado (DM) que você quer limpar')
+async def limpar_dm(interaction: discord.Interaction, channel_id: str):
+    """Usa o token armazenado para deletar mensagens suas na DM."""
+    user_id = interaction.user.id
+    token = user_tokens.get(user_id)
+    if not token:
+        await interaction.response.send_message(
+            '❌ Você ainda não configurou seu token. Use `/configurar` primeiro.',
+            ephemeral=True
+        )
+        return
+
+    # Validar se o ID é numérico
+    try:
+        channel_id_int = int(channel_id)
+    except ValueError:
+        await interaction.response.send_message('❌ O ID do canal deve ser um número.', ephemeral=True)
+        return
+
+    await interaction.response.defer(ephemeral=True)  # Defer para não expirar
+
+    # Fazer requisições à API do Discord usando o token do usuário
+    headers = {
+        'Authorization': token,
+        'Content-Type': 'application/json'
+    }
+    async with aiohttp.ClientSession() as session:
+        # Verificar se o canal existe e é uma DM
+        async with session.get(f'https://discord.com/api/v10/channels/{channel_id_int}', headers=headers) as resp:
+            if resp.status != 200:
+                await interaction.followup.send(
+                    '❌ Canal não encontrado ou você não tem acesso. Verifique o ID e se é uma DM.',
+                    ephemeral=True
+                )
+                return
+            channel_data = await resp.json()
+            if channel_data.get('type') != 1:  # 1 = DM
+                await interaction.followup.send('❌ O ID fornecido não é uma DM privada.', ephemeral=True)
+                return
+
+        # Buscar mensagens do canal (últimas 1000)
+        messages_deleted = 0
+        limit = 1000
+        last_id = None
+        while True:
+            url = f'https://discord.com/api/v10/channels/{channel_id_int}/messages?limit=100'
+            if last_id:
+                url += f'&before={last_id}'
+            async with session.get(url, headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.followup.send(f'❌ Erro ao buscar mensagens: {resp.status}', ephemeral=True)
+                    return
+                messages = await resp.json()
+                if not messages:
+                    break
+                # Filtrar mensagens do próprio usuário
+                for msg in messages:
+                    if msg['author']['id'] == str(user_id):
+                        # Deletar
+                        del_url = f'https://discord.com/api/v10/channels/{channel_id_int}/messages/{msg["id"]}'
+                        async with session.delete(del_url, headers=headers) as del_resp:
+                            if del_resp.status == 204:
+                                messages_deleted += 1
+                            else:
+                                print(f'Falha ao deletar msg {msg["id"]}: {del_resp.status}')
+                        # Pequena pausa para evitar rate-limit
+                        await asyncio.sleep(0.1)
+                last_id = messages[-1]['id']
+                if len(messages) < 100:
+                    break
+
+        await interaction.followup.send(
+            f'✅ Deletadas {messages_deleted} mensagens suas na DM.',
+            ephemeral=True
+        )
+
+# ============================================================
+# EVENTO DE PRONTO E SINCRONIZAÇÃO DE COMANDOS
+# ============================================================
 @bot.event
 async def on_ready():
-    print(f'✅ Logado como {bot.user} (ID: {bot.user.id})')
-    print('📌 Comandos disponíveis:')
-    print('   !definir_dm <ID_DO_CANAL>  - Define qual DM será limpa')
-    print('   !limpar                   - Apaga suas mensagens na DM definida')
-    print('   !status                   - Mostra qual DM está definida')
-
-@bot.command(name='definir_dm')
-async def definir_dm(ctx, channel_id: int):
-    """
-    Uso: !definir_dm <ID_DO_CANAL_DM>
-    Define o canal privado que será limpo.
-    """
-    global canal_alvo_id
-
-    channel = bot.get_channel(channel_id)
-    if channel is None:
-        await ctx.send("❌ Canal não encontrado. Verifique o ID.")
-        return
-
-    if not isinstance(channel, discord.DMChannel):
-        await ctx.send("❌ Isso não é um chat privado (DM). Use o ID de uma DM.")
-        return
-
-    canal_alvo_id = channel_id
-    await ctx.send(f"✅ Canal definido: {channel.recipient} (ID: {channel_id})")
-
-@bot.command(name='limpar')
-async def limpar(ctx):
-    """
-    Uso: !limpar
-    Apaga as últimas 1000 mensagens enviadas por VOCÊ na DM definida.
-    """
-    global canal_alvo_id
-
-    if canal_alvo_id is None:
-        await ctx.send("❌ Nenhuma DM definida. Use !definir_dm <ID> primeiro.")
-        return
-
-    channel = bot.get_channel(canal_alvo_id)
-    if channel is None:
-        await ctx.send("❌ Canal não encontrado. Defina novamente com !definir_dm.")
-        canal_alvo_id = None
-        return
-
-    if not isinstance(channel, discord.DMChannel):
-        await ctx.send("❌ O ID salvo não é uma DM. Defina novamente.")
-        canal_alvo_id = None
-        return
-
-    await ctx.send(f"🔍 Iniciando limpeza em {channel.recipient}... (últimas 1000 mensagens)")
-
-    count = 0
-    limit = 1000  # ← ajuste se quiser mais
-
-    async for message in channel.history(limit=limit):
-        if message.author == bot.user:
-            try:
-                await message.delete()
-                count += 1
-                if count % 30 == 0:
-                    await asyncio.sleep(0.5)
-            except discord.HTTPException as e:
-                print(f"⚠️ Erro ao deletar: {e}")
-
-    await ctx.send(f"✅ Deletadas {count} mensagens suas em {channel.recipient}.")
-
-@bot.command(name='status')
-async def status(ctx):
-    """
-    Uso: !status
-    Mostra qual DM está definida atualmente.
-    """
-    global canal_alvo_id
-
-    if canal_alvo_id is None:
-        await ctx.send("📌 Nenhuma DM definida. Use !definir_dm <ID>")
-        return
-
-    channel = bot.get_channel(canal_alvo_id)
-    if channel is None:
-        await ctx.send("❌ O ID salvo não é mais válido. Defina novamente.")
-        canal_alvo_id = None
-        return
-
-    await ctx.send(f"📌 DM definida: {channel.recipient} (ID: {canal_alvo_id})")
+    print(f'✅ Bot oficial logado como {bot.user} (ID: {bot.user.id})')
+    await bot.tree.sync()
+    print('📌 Comandos slash sincronizados.')
 
 # ============================================================
-# 3. INICIALIZAÇÃO
+# INICIALIZAÇÃO
 # ============================================================
-
 if __name__ == "__main__":
-    try:
-        bot.run(TOKEN)
-    except discord.LoginFailure:
-        print("❌ Token inválido. Verifique se você copiou corretamente.")
-    except KeyboardInterrupt:
-        print("\n👋 Bot encerrado pelo usuário.")
-    except Exception as e:
-        print(f"❌ Erro inesperado: {e}")
+    bot.run(TOKEN_BOT)
