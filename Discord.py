@@ -3,6 +3,7 @@ from discord.ext import commands
 import asyncio
 import threading
 import sys
+import os  # ← ESSA LINHA ESTAVA FALTANDO
 from flask import Flask, request, render_template_string
 
 # ============================================================
@@ -56,13 +57,10 @@ def index():
             message = "❌ Token vazio!"
             success = False
         else:
-            # Se já tiver um bot rodando, encerra antes de iniciar outro
-            if bot_instance and bot_instance.is_ready():
-                # Não podemos parar o bot facilmente, mas podemos ignorar e avisar
+            if bot_instance and bot_instance.is_alive():
                 message = "⚠️ Bot já está rodando. Reinicie o serviço para trocar o token."
                 success = False
             else:
-                # Inicia o bot em uma thread separada
                 try:
                     start_bot_thread(token)
                     message = "✅ Bot iniciado com sucesso! Volte para o Discord e use !limpar_dm."
@@ -133,15 +131,12 @@ def start_bot_thread(token):
     thread = threading.Thread(target=run_bot, args=(token,), daemon=True)
     thread.start()
     global bot_instance
-    # Armazenamos uma referência (opcional)
-    # Não podemos acessar o bot diretamente de outra thread com segurança, mas é ok.
     bot_instance = thread
 
 # ============================================================
 # INICIALIZAÇÃO PRINCIPAL
 # ============================================================
 if __name__ == "__main__":
-    # Inicia o servidor Flask na porta definida pelo Railway (ou 8080)
     port = int(os.environ.get("PORT", 8080))
     print(f"🌐 Servidor web rodando em http://0.0.0.0:{port}")
     print("🔑 Acesse no navegador para colocar o token.")
