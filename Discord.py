@@ -8,66 +8,50 @@ import os
 # ============================================================
 # CONFIGURAÇÃO DO BOT OFICIAL
 # ============================================================
-TOKEN_BOT = os.getenv('BOT_TOKEN')  # Token do bot oficial (MT...)
+TOKEN_BOT = os.getenv('BOT_TOKEN')  # Token do bot oficial (começa com MT...)
+
 if not TOKEN_BOT:
     print("❌ Defina a variável de ambiente BOT_TOKEN com o token do seu bot oficial.")
     exit(1)
 
 intents = discord.Intents.default()
+# Não precisamos de message_content para slash commands
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Dicionário para armazenar dados por usuário
-user_data = {}  # {user_id: {"token": str, "channel_id": int, "deleting": bool}}
+user_data = {}  # {user_id: {'token': str, 'chat_id': int, 'cleaning': bool}}
 
 # ============================================================
 # MODAL PARA INSERIR TOKEN
 # ============================================================
-class TokenModal(discord.ui.Modal, title='🔑 Inserir Token do Usuário'):
+class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
     token_input = discord.ui.TextInput(
-        label='Cole seu token de usuário (self-bot)',
-        placeholder='Token obtido pelo navegador',
+        label='Cole seu token de usuário aqui',
+        placeholder='Ex: NDIzNDU2Nzg5MDEyMzQ1Njc4.xyz...',
         style=discord.TextStyle.paragraph,
         required=True,
         min_length=50,
-        max_length=200
+        max_length=100
     )
 
     async def on_submit(self, interaction: discord.Interaction):
         token = self.token_input.value.strip()
-        user_id = interaction.user.id
-        if user_id not in user_data:
-            user_data[user_id] = {}
-        user_data[user_id]['token'] = token
-        # Limpa channel_id anterior se existir
-        user_data[user_id].pop('channel_id', None)
+        if interaction.user.id not in user_data:
+            user_data[interaction.user.id] = {}
+        user_data[interaction.user.id]['token'] = token
         await interaction.response.send_message(
-            f'✅ Token configurado! Agora clique no botão abaixo para definir o chat a ser limpo.',
-            ephemeral=True,
-            view=ChatSetupView(user_id)
+            f'✅ Token configurado com sucesso!',
+            ephemeral=True
         )
-
-# ============================================================
-# VIEW: BOTÃO PARA DEFINIR CHAT
-# ============================================================
-class ChatSetupView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=300)  # 5 minutos para responder
-        self.user_id = user_id
-
-    @discord.ui.button(label='📌 Definir Chat (ID da DM)', style=discord.ButtonStyle.primary)
-    async def define_chat(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Esse botão não é para você.", ephemeral=True)
-            return
-        # Abre modal para inserir o ID do canal
-        await interaction.response.send_modal(ChatIDModal(self.user_id))
+        # Atualizar o painel (se estiver aberto) - será feito pelo botão de atualização ou manualmente
+        print(f'Token configurado para {interaction.user}')
 
 # ============================================================
 # MODAL PARA INSERIR ID DO CHAT
 # ============================================================
-class ChatIDModal(discord.ui.Modal, title='📌 ID do Chat Privado'):
-    chat_id_input = discord.ui.TextInput(
-        label='Cole o ID do chat (DM)',
+class ChatModal(discord.ui.Modal, title='💬 Definir Chat DM'):
+    chat_input = discord.ui.TextInput(
+        label='ID do canal privado (DM)',
         placeholder='Ex: 123456789012345678',
         style=discord.TextStyle.short,
         required=True,
@@ -75,191 +59,195 @@ class ChatIDModal(discord.ui.Modal, title='📌 ID do Chat Privado'):
         max_length=20
     )
 
-    def __init__(self, user_id):
-        super().__init__()
-        self.user_id = user_id
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
-            channel_id = int(self.chat_id_input.value.strip())
+            chat_id = int(self.chat_input.value.strip())
         except ValueError:
-            await interaction.response.send_message("❌ ID inválido. Deve ser um número.", ephemeral=True)
+            await interaction.response.send_message('❌ ID inválido. Deve ser um número.', ephemeral=True)
             return
-        # Salva o channel_id
-        if self.user_id not in user_data:
-            user_data[self.user_id] = {}
-        user_data[self.user_id]['channel_id'] = channel_id
+
+        if interaction.user.id not in user_data:
+            user_data[interaction.user.id] = {}
+        user_data[interaction.user.id]['chat_id'] = chat_id
+
+        # Verificar se o canal existe e é DM (usando o token do usuário)
+        token = user_data[interaction.user.id].get('token')
+        if not token:
+            await interaction.response.send_message(
+                '❌ Primeiro configure seu token usando o botão "Configurar Token".',
+                ephemeral=True
+            )
+            return
+
+        headers = {'Authorization': token, 'Content-Type': 'application/json'}
+        async with aiohttp.ClientSession() as session:
+            async with session.get(f'https://discord.com/api/v10/channels/{chat_id}', headers=headers) as resp:
+                if resp.status != 200:
+                    await interaction.response.send_message(
+                        '❌ Canal não encontrado ou você não tem acesso. Verifique o ID.',
+                        ephemeral=True
+                    )
+                    return
+                data = await resp.json()
+                if data.get('type') != 1:  # 1 = DM
+                    await interaction.response.send_message('❌ O ID fornecido não é uma DM privada.', ephemeral=True)
+                    return
+
         await interaction.response.send_message(
-            f'✅ Chat definido (ID: {channel_id}). Agora clique em "Iniciar Limpeza" para começar.',
-            ephemeral=True,
-            view=CleanupStartView(self.user_id)
+            f'✅ Chat definido com sucesso! (ID: {chat_id})',
+            ephemeral=True
         )
+        print(f'Chat definido para {interaction.user}: {chat_id}')
 
 # ============================================================
-# VIEW: BOTÃO INICIAR LIMPEZA
+# VIEW DO PAINEL (com botões)
 # ============================================================
-class CleanupStartView(discord.ui.View):
-    def __init__(self, user_id):
-        super().__init__(timeout=300)
+class PainelView(discord.ui.View):
+    def __init__(self, user_id: int):
+        super().__init__(timeout=None)  # Timeout None para manter os botões ativos
         self.user_id = user_id
 
-    @discord.ui.button(label='🧹 Iniciar Limpeza', style=discord.ButtonStyle.danger)
-    async def start_cleanup(self, interaction: discord.Interaction, button: discord.ui.Button):
+    @discord.ui.button(label='🔑 Configurar Token', style=discord.ButtonStyle.primary, custom_id='config_token')
+    async def config_token_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ Esse botão não é para você.", ephemeral=True)
+            await interaction.response.send_message('❌ Este painel é pessoal.', ephemeral=True)
             return
-        # Verifica se já está em processo
-        if user_data.get(self.user_id, {}).get('deleting', False):
-            await interaction.response.send_message("⚠️ Uma limpeza já está em andamento.", ephemeral=True)
+        await interaction.response.send_modal(TokenModal())
+
+    @discord.ui.button(label='💬 Definir Chat DM', style=discord.ButtonStyle.success, custom_id='set_chat')
+    async def set_chat_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('❌ Este painel é pessoal.', ephemeral=True)
             return
-        # Dispara a limpeza
-        await interaction.response.send_message("🔍 Iniciando limpeza...", ephemeral=True)
-        # Inicia a tarefa de limpeza (em background)
-        bot.loop.create_task(perform_cleanup(interaction, self.user_id))
+        await interaction.response.send_modal(ChatModal())
 
-# ============================================================
-# FUNÇÃO DE LIMPEZA (com progresso e delay)
-# ============================================================
-async def perform_cleanup(interaction: discord.Interaction, user_id: int):
-    user = user_data.get(user_id)
-    if not user or 'token' not in user or 'channel_id' not in user:
-        await interaction.followup.send("❌ Token ou chat não configurados.", ephemeral=True)
-        return
+    @discord.ui.button(label='🧹 Iniciar Limpeza', style=discord.ButtonStyle.danger, custom_id='start_clean')
+    async def start_clean_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message('❌ Este painel é pessoal.', ephemeral=True)
+            return
 
-    token = user['token']
-    channel_id = user['channel_id']
-    # Marca como em progresso
-    user['deleting'] = True
+        # Verificar se token e chat estão configurados
+        data = user_data.get(self.user_id, {})
+        token = data.get('token')
+        chat_id = data.get('chat_id')
 
-    # Mensagem de progresso (será editada)
-    progress_msg = await interaction.followup.send("🔄 Preparando...", ephemeral=True)
+        if not token:
+            await interaction.response.send_message('❌ Token não configurado. Use o botão "Configurar Token".', ephemeral=True)
+            return
+        if not chat_id:
+            await interaction.response.send_message('❌ Chat não definido. Use o botão "Definir Chat DM".', ephemeral=True)
+            return
 
-    headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    async with aiohttp.ClientSession() as session:
-        # Verifica o canal
-        async with session.get(f'https://discord.com/api/v10/channels/{channel_id}', headers=headers) as resp:
-            if resp.status != 200:
-                await progress_msg.edit(content="❌ Canal não encontrado ou sem acesso.")
-                user['deleting'] = False
-                return
-            channel_data = await resp.json()
-            if channel_data.get('type') != 1:
-                await progress_msg.edit(content="❌ O ID não é de uma DM.")
-                user['deleting'] = False
-                return
+        # Verificar se já está em limpeza
+        if data.get('cleaning', False):
+            await interaction.response.send_message('⏳ Uma limpeza já está em andamento.', ephemeral=True)
+            return
 
-        # Busca mensagens até um limite máximo (ex: 1000)
-        max_messages = 1000
-        deleted = 0
-        last_id = None
-        total_fetched = 0
+        # Iniciar limpeza
+        await interaction.response.defer(ephemeral=False)  # Resposta pública (não ephemeral) para ver o progresso
 
-        while True:
-            url = f'https://discord.com/api/v10/channels/{channel_id}/messages?limit=100'
-            if last_id:
-                url += f'&before={last_id}'
-            async with session.get(url, headers=headers) as resp:
-                if resp.status != 200:
-                    await progress_msg.edit(content=f"❌ Erro ao buscar mensagens: {resp.status}")
-                    user['deleting'] = False
-                    return
-                messages = await resp.json()
-                if not messages:
-                    break
-                total_fetched += len(messages)
-
-                # Filtra apenas mensagens do usuário (self)
-                user_messages = [m for m in messages if m['author']['id'] == str(user_id)]
-                for msg in user_messages:
-                    if deleted >= max_messages:
-                        break
-                    del_url = f'https://discord.com/api/v10/channels/{channel_id}/messages/{msg["id"]}'
-                    async with session.delete(del_url, headers=headers) as del_resp:
-                        if del_resp.status == 204:
-                            deleted += 1
-                        else:
-                            print(f"Erro ao deletar {msg['id']}: {del_resp.status}")
-                    # Delay de 0.5 segundos entre cada deleção (temporizador)
-                    await asyncio.sleep(0.5)
-
-                    # Atualiza progresso a cada 5 mensagens
-                    if deleted % 5 == 0 or deleted == max_messages:
-                        progress = min(deleted / max_messages * 100, 100)
-                        bar = "🟩" * int(progress // 10) + "⬜" * (10 - int(progress // 10))
-                        await progress_msg.edit(
-                            content=f"🧹 Deletando mensagens...\n"
-                                    f"Progresso: {bar} {deleted}/{max_messages} (max)\n"
-                                    f"Último lote: {len(messages)} mensagens buscadas."
-                        )
-
-                    if deleted >= max_messages:
-                        break
-
-                last_id = messages[-1]['id']
-                if len(messages) < 100 or deleted >= max_messages:
-                    break
-
-        # Finalizado
-        user['deleting'] = False
-        await progress_msg.edit(
-            content=f"✅ Limpeza concluída! Deletadas **{deleted}** mensagens suas (limite de {max_messages})."
+        # Enviar mensagem inicial de progresso
+        progress_msg = await interaction.followup.send(
+            f'🔄 **Iniciando limpeza...**\nChat: {chat_id}\n0 mensagens deletadas'
         )
 
-# ============================================================
-# COMANDO SLASH: /configurar
-# ============================================================
-@bot.tree.command(name='configurar', description='Configurar token e chat para limpeza')
-async def configurar(interaction: discord.Interaction):
-    """Envia uma mensagem com botão para inserir token."""
-    # Cria uma view com botão
-    view = discord.ui.View()
-    view.add_item(discord.ui.Button(label='🔑 Inserir Token', style=discord.ButtonStyle.primary, custom_id='token_btn'))
+        # Marcar como em limpeza
+        user_data[self.user_id]['cleaning'] = True
 
-    # Definimos uma callback para o botão
-    async def token_callback(interaction: discord.Interaction):
-        if interaction.user.id != interaction.user.id:
-            await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
-            return
-        await interaction.response.send_modal(TokenModal())
+        # Executar limpeza em background
+        bot.loop.create_task(
+            self.clean_dm(
+                interaction=interaction,
+                token=token,
+                chat_id=chat_id,
+                progress_msg=progress_msg
+            )
+        )
 
-    # Atribui a callback ao botão (precisa ser feito via view com um botão customizado)
-    # Vou refazer com uma classe View para simplificar
-    await interaction.response.send_message(
-        "Clique no botão abaixo para inserir seu token de usuário.",
-        ephemeral=True,
-        view=TokenSetupView()
-    )
+    async def clean_dm(self, interaction: discord.Interaction, token: str, chat_id: int, progress_msg: discord.Message):
+        """Função assíncrona que faz a limpeza e atualiza o progresso."""
+        user_id = self.user_id
+        headers = {'Authorization': token, 'Content-Type': 'application/json'}
+        messages_deleted = 0
+        last_id = None
+        total_fetched = 0
+        max_messages = 1000  # Limite seguro para não sobrecarregar
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                while True:
+                    # Buscar lote de mensagens (100 por vez)
+                    url = f'https://discord.com/api/v10/channels/{chat_id}/messages?limit=100'
+                    if last_id:
+                        url += f'&before={last_id}'
+                    async with session.get(url, headers=headers) as resp:
+                        if resp.status != 200:
+                            await progress_msg.edit(content=f'❌ Erro ao buscar mensagens: {resp.status}')
+                            break
+                        messages = await resp.json()
+                        if not messages:
+                            break
+
+                        total_fetched += len(messages)
+                        for msg in messages:
+                            if msg['author']['id'] == str(user_id):
+                                # Deletar mensagem
+                                del_url = f'https://discord.com/api/v10/channels/{chat_id}/messages/{msg["id"]}'
+                                async with session.delete(del_url, headers=headers) as del_resp:
+                                    if del_resp.status == 204:
+                                        messages_deleted += 1
+                                    else:
+                                        print(f'Falha ao deletar {msg["id"]}: {del_resp.status}')
+                                # Pausa de 0.2 segundos entre deleções para evitar rate-limit
+                                await asyncio.sleep(0.2)
+
+                            # Atualizar progresso a cada 5 mensagens deletadas
+                            if messages_deleted % 5 == 0 and messages_deleted > 0:
+                                await progress_msg.edit(
+                                    content=f'🔄 **Limpando...**\nChat: {chat_id}\n'
+                                            f'✅ {messages_deleted} mensagens deletadas\n'
+                                            f'📊 {total_fetched} mensagens analisadas'
+                                )
+
+                        last_id = messages[-1]['id']
+                        if len(messages) < 100:
+                            break
+
+            # Finalizado
+            await progress_msg.edit(
+                content=f'✅ **Limpeza concluída!**\n'
+                        f'Chat: {chat_id}\n'
+                        f'🗑️ {messages_deleted} mensagens deletadas\n'
+                        f'📊 {total_fetched} mensagens analisadas'
+            )
+            user_data[self.user_id]['cleaning'] = False
+
+        except Exception as e:
+            await progress_msg.edit(content=f'❌ Erro durante a limpeza: {str(e)}')
+            user_data[self.user_id]['cleaning'] = False
+            raise
 
 # ============================================================
-# VIEW PARA O BOTÃO DE TOKEN
+# COMANDO SLASH /paineldm
 # ============================================================
-class TokenSetupView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=600)
-
-    @discord.ui.button(label='🔑 Inserir Token', style=discord.ButtonStyle.primary)
-    async def token_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(TokenModal())
-
-# ============================================================
-# COMANDO DE AJUDA (opcional)
-# ============================================================
-@bot.tree.command(name='ajuda', description='Como usar o bot')
-async def ajuda(interaction: discord.Interaction):
+@bot.tree.command(name='paineldm', description='Abre o painel de controle para limpeza de DMs')
+async def paineldm(interaction: discord.Interaction):
+    """Envia o painel com botões para o usuário."""
+    view = PainelView(interaction.user.id)
     embed = discord.Embed(
-        title="🤖 Bot de Limpeza de DM",
-        description="Passos para usar:\n"
-                    "1. Use `/configurar` e clique em 'Inserir Token'.\n"
-                    "2. Cole o token do seu usuário (self-bot).\n"
-                    "3. Depois, clique em 'Definir Chat' e cole o ID da DM.\n"
-                    "4. Clique em 'Iniciar Limpeza'.\n"
-                    "5. Acompanhe o progresso!",
-        color=0x00ff00
+        title='🛠️ Painel de Limpeza de DM',
+        description='Use os botões abaixo para configurar e iniciar a limpeza.',
+        color=discord.Color.blue()
     )
-    await interaction.response.send_message(embed=embed, ephemeral=True)
+    embed.add_field(name='🔑 Token', value='*Não configurado*' if not user_data.get(interaction.user.id, {}).get('token') else '✅ Configurado', inline=True)
+    embed.add_field(name='💬 Chat ID', value='*Não definido*' if not user_data.get(interaction.user.id, {}).get('chat_id') else f'`{user_data[interaction.user.id]["chat_id"]}`', inline=True)
+    embed.set_footer(text='Clique nos botões para interagir.')
+
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 # ============================================================
-# EVENTO ON_READY E SINCRONIZAÇÃO
+# EVENTO DE PRONTO E SINCRONIZAÇÃO
 # ============================================================
 @bot.event
 async def on_ready():
