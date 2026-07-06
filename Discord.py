@@ -1,143 +1,135 @@
 import discord
 from discord.ext import commands
-import asyncio
-import threading
+import os
 import sys
-import os  # ← ESSA LINHA ESTAVA FALTANDO
-from flask import Flask, request, render_template_string
+import asyncio
 
 # ============================================================
-# FLASK - Servidor web para inserir token
+# 1. INSERIR TOKEN (via terminal ou variável de ambiente)
 # ============================================================
-app = Flask(__name__)
 
-# Variável global para armazenar o token e o bot
-bot_instance = None
-token_received = False
+# Opção 1: Variável de ambiente (recomendado para Railway)
+TOKEN = os.getenv('SEU_TOKEN_DE_USUARIO')
 
-# Página HTML simples com formulário
-HTML_PAGE = """
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Token do Bot</title>
-    <style>
-        body { font-family: Arial; max-width: 500px; margin: 50px auto; text-align: center; }
-        input, button { padding: 10px; margin: 10px; width: 80%; }
-        button { background: #5865F2; color: white; border: none; cursor: pointer; }
-        button:hover { background: #4752C4; }
-        .status { color: green; }
-        .error { color: red; }
-    </style>
-</head>
-<body>
-    <h1>🤖 Discord Self-Bot</h1>
-    <p>Cole seu token abaixo para iniciar o bot:</p>
-    <form method="POST">
-        <input type="text" name="token" placeholder="Cole seu token aqui..." required>
-        <br>
-        <button type="submit">Iniciar Bot</button>
-    </form>
-    {% if message %}
-        <p class="{{ 'status' if success else 'error' }}">{{ message }}</p>
-    {% endif %}
-</body>
-</html>
-"""
+# Opção 2: Input no terminal (se não tiver variável de ambiente)
+if not TOKEN:
+    TOKEN = input("🔑 Cole seu token do Discord e pressione Enter: ").strip()
 
-@app.route('/', methods=['GET', 'POST'])
-def index():
-    global token_received, bot_instance
-    message = None
-    success = False
-
-    if request.method == 'POST':
-        token = request.form.get('token', '').strip()
-        if not token:
-            message = "❌ Token vazio!"
-            success = False
-        else:
-            if bot_instance and bot_instance.is_alive():
-                message = "⚠️ Bot já está rodando. Reinicie o serviço para trocar o token."
-                success = False
-            else:
-                try:
-                    start_bot_thread(token)
-                    message = "✅ Bot iniciado com sucesso! Volte para o Discord e use !limpar_dm."
-                    success = True
-                    token_received = True
-                except Exception as e:
-                    message = f"❌ Erro ao iniciar: {e}"
-                    success = False
-
-    return render_template_string(HTML_PAGE, message=message, success=success)
+if not TOKEN:
+    print("❌ Token vazio. Encerrando.")
+    sys.exit(1)
 
 # ============================================================
-# DISCORD BOT (self-bot)
+# 2. CONFIGURAR O BOT (self-bot)
 # ============================================================
-def run_bot(token):
-    """Função que inicializa e roda o bot Discord."""
-    intents = discord.Intents.default()
-    intents.message_content = True
-    intents.messages = True
 
-    bot = commands.Bot(command_prefix='!', self_bot=True, intents=intents)
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
 
-    @bot.event
-    async def on_ready():
-        print(f'✅ Logado como {bot.user} (ID: {bot.user.id})')
-        print('📌 Aguardando comandos...')
+bot = commands.Bot(command_prefix='!', self_bot=True, intents=intents)
 
-    @bot.command(name='limpar_dm')
-    async def limpar_dm(ctx, channel_id: int):
-        """
-        Uso: !limpar_dm <ID_DO_CANAL_DM>
-        Apaga as últimas 1000 mensagens enviadas por VOCÊ na DM.
-        """
-        channel = bot.get_channel(channel_id)
-        if channel is None:
-            await ctx.send("❌ Canal não encontrado. Verifique o ID.")
-            return
+# Variável para guardar o ID do canal DM alvo
+canal_alvo_id = None
 
-        if not isinstance(channel, discord.DMChannel):
-            await ctx.send("❌ Isso não é um chat privado (DM).")
-            return
+@bot.event
+async def on_ready():
+    print(f'✅ Logado como {bot.user} (ID: {bot.user.id})')
+    print('📌 Comandos disponíveis:')
+    print('   !definir_dm <ID_DO_CANAL>  - Define qual DM será limpa')
+    print('   !limpar                   - Apaga suas mensagens na DM definida')
+    print('   !status                   - Mostra qual DM está definida')
 
-        await ctx.send(f"🔍 Iniciando limpeza em {channel.recipient}... (últimas 1000)")
+@bot.command(name='definir_dm')
+async def definir_dm(ctx, channel_id: int):
+    """
+    Uso: !definir_dm <ID_DO_CANAL_DM>
+    Define o canal privado que será limpo.
+    """
+    global canal_alvo_id
 
-        count = 0
-        limit = 1000
-        async for message in channel.history(limit=limit):
-            if message.author == bot.user:
-                try:
-                    await message.delete()
-                    count += 1
-                    if count % 30 == 0:
-                        await asyncio.sleep(0.5)
-                except discord.HTTPException as e:
-                    print(f"⚠️ Erro ao deletar: {e}")
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        await ctx.send("❌ Canal não encontrado. Verifique o ID.")
+        return
 
-        await ctx.send(f"✅ Deletadas {count} mensagens suas em {channel.recipient}.")
+    if not isinstance(channel, discord.DMChannel):
+        await ctx.send("❌ Isso não é um chat privado (DM). Use o ID de uma DM.")
+        return
 
-    try:
-        bot.run(token)
-    except discord.LoginFailure:
-        print("❌ Token inválido.")
-    except Exception as e:
-        print(f"❌ Erro no bot: {e}")
+    canal_alvo_id = channel_id
+    await ctx.send(f"✅ Canal definido: {channel.recipient} (ID: {channel_id})")
 
-def start_bot_thread(token):
-    """Inicia o bot em uma thread separada para não bloquear o Flask."""
-    thread = threading.Thread(target=run_bot, args=(token,), daemon=True)
-    thread.start()
-    global bot_instance
-    bot_instance = thread
+@bot.command(name='limpar')
+async def limpar(ctx):
+    """
+    Uso: !limpar
+    Apaga as últimas 1000 mensagens enviadas por VOCÊ na DM definida.
+    """
+    global canal_alvo_id
+
+    if canal_alvo_id is None:
+        await ctx.send("❌ Nenhuma DM definida. Use !definir_dm <ID> primeiro.")
+        return
+
+    channel = bot.get_channel(canal_alvo_id)
+    if channel is None:
+        await ctx.send("❌ Canal não encontrado. Defina novamente com !definir_dm.")
+        canal_alvo_id = None
+        return
+
+    if not isinstance(channel, discord.DMChannel):
+        await ctx.send("❌ O ID salvo não é uma DM. Defina novamente.")
+        canal_alvo_id = None
+        return
+
+    await ctx.send(f"🔍 Iniciando limpeza em {channel.recipient}... (últimas 1000 mensagens)")
+
+    count = 0
+    limit = 1000  # ← ajuste se quiser mais
+
+    async for message in channel.history(limit=limit):
+        if message.author == bot.user:
+            try:
+                await message.delete()
+                count += 1
+                if count % 30 == 0:
+                    await asyncio.sleep(0.5)
+            except discord.HTTPException as e:
+                print(f"⚠️ Erro ao deletar: {e}")
+
+    await ctx.send(f"✅ Deletadas {count} mensagens suas em {channel.recipient}.")
+
+@bot.command(name='status')
+async def status(ctx):
+    """
+    Uso: !status
+    Mostra qual DM está definida atualmente.
+    """
+    global canal_alvo_id
+
+    if canal_alvo_id is None:
+        await ctx.send("📌 Nenhuma DM definida. Use !definir_dm <ID>")
+        return
+
+    channel = bot.get_channel(canal_alvo_id)
+    if channel is None:
+        await ctx.send("❌ O ID salvo não é mais válido. Defina novamente.")
+        canal_alvo_id = None
+        return
+
+    await ctx.send(f"📌 DM definida: {channel.recipient} (ID: {canal_alvo_id})")
 
 # ============================================================
-# INICIALIZAÇÃO PRINCIPAL
+# 3. INICIALIZAÇÃO
 # ============================================================
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
-    print(f"🌐 Servidor web rodando em http://0.0.0.0:{port}")
-    print("🔑 Acesse no navegador para colocar o token.")
-    app.run(host='0.0.0.0', port=port)
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("❌ Token inválido. Verifique se você copiou corretamente.")
+    except KeyboardInterrupt:
+        print("\n👋 Bot encerrado pelo usuário.")
+    except Exception as e:
+        print(f"❌ Erro inesperado: {e}")
