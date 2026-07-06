@@ -1,116 +1,78 @@
 import discord
 from discord.ext import commands
-import tkinter as tk
-from tkinter import scrolledtext, messagebox
-import threading
+import os
+import sys
 import asyncio
 
-class DiscordSelfBotGUI:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("Self-Bot Discord - Limpar DM")
-        self.root.geometry("600x500")
-        self.root.resizable(False, False)
+# ============================================================
+# 1. INSERIR O TOKEN VIA INPUT (Opção B ativa)
+# ============================================================
 
-        # Token input
-        tk.Label(root, text="Cole seu Token de Usuário:", font=("Arial", 12)).pack(pady=5)
-        self.token_entry = tk.Entry(root, width=60, show="*")
-        self.token_entry.pack(pady=5)
+TOKEN = input("🔑 Cole seu token do Discord e pressione Enter: ").strip()
 
-        # Botão de mostrar/ocultar token
-        self.show_token = tk.BooleanVar(value=False)
-        tk.Checkbutton(root, text="Mostrar Token", variable=self.show_token, command=self.toggle_token_visibility).pack()
+if not TOKEN:
+    print("❌ Token vazio. Encerrando.")
+    sys.exit(1)
 
-        # Botão iniciar
-        self.start_button = tk.Button(root, text="Iniciar Bot", command=self.start_bot, bg="green", fg="white", font=("Arial", 12))
-        self.start_button.pack(pady=10)
+# ============================================================
+# 2. CONFIGURAÇÃO DO BOT (self-bot)
+# ============================================================
 
-        # Área de logs
-        self.log_area = scrolledtext.ScrolledText(root, width=70, height=20, state='disabled')
-        self.log_area.pack(pady=5)
+intents = discord.Intents.default()
+intents.message_content = True
+intents.messages = True
 
-        self.bot_thread = None
-        self.bot_instance = None
-        self.loop = asyncio.new_event_loop()
+bot = commands.Bot(command_prefix='!', self_bot=True, intents=intents)
 
-    def toggle_token_visibility(self):
-        if self.show_token.get():
-            self.token_entry.config(show="")
-        else:
-            self.token_entry.config(show="*")
+@bot.event
+async def on_ready():
+    print(f'✅ Logado como {bot.user} (ID: {bot.user.id})')
+    print(f'📌 Aguardando comandos...')
+    print('💡 Use: !limpar_dm <ID_DO_CANAL_DM>')
 
-    def log(self, msg):
-        self.log_area.config(state='normal')
-        self.log_area.insert(tk.END, msg + "\n")
-        self.log_area.see(tk.END)
-        self.log_area.config(state='disabled')
-        self.root.update()
+@bot.command(name='limpar_dm')
+async def limpar_dm(ctx, channel_id: int):
+    """
+    Uso: !limpar_dm <ID_DO_CANAL_DM>
+    Apaga as últimas 1000 mensagens enviadas por VOCÊ naquela DM.
+    """
+    channel = bot.get_channel(channel_id)
+    if channel is None:
+        await ctx.send("❌ Canal não encontrado. Verifique o ID.")
+        return
 
-    def start_bot(self):
-        token = self.token_entry.get().strip()
-        if not token:
-            messagebox.showerror("Erro", "Por favor, cole um token válido.")
-            return
+    if not isinstance(channel, discord.DMChannel):
+        await ctx.send("❌ Isso não é um chat privado (DM).")
+        return
 
-        self.start_button.config(state='disabled', text='Iniciando...')
-        self.log("Iniciando bot com token...")
+    await ctx.send(f"🔍 Iniciando limpeza em {channel.recipient}... (últimas 1000 mensagens)")
 
-        # Iniciar o bot em uma thread separada para não travar a GUI
-        self.bot_thread = threading.Thread(target=self.run_bot, args=(token,), daemon=True)
-        self.bot_thread.start()
+    count = 0
+    limit = 1000  # ← ajuste aqui se quiser mais (ex: 5000), mas cuidado com rate-limit
 
-    def run_bot(self, token):
-        # Cria o bot com self_bot=True
-        intents = discord.Intents.default()
-        intents.message_content = True
-        intents.messages = True
-
-        bot = commands.Bot(command_prefix='!', self_bot=True, intents=intents)
-
-        @bot.event
-        async def on_ready():
-            self.log(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-            self.start_button.config(state='normal', text='Bot Ativo', bg='blue')
-            self.log("Comando disponível: !limpar_dm <ID_DO_CANAL>")
-
-        @bot.command(name='limpar_dm')
-        async def limpar_dm(ctx, channel_id: int):
+    async for message in channel.history(limit=limit):
+        if message.author == bot.user:
             try:
-                channel = bot.get_channel(channel_id)
-                if channel is None or not isinstance(channel, discord.DMChannel):
-                    await ctx.send("ID inválido ou não é uma DM.")
-                    return
+                await message.delete()
+                count += 1
+                # Pausa a cada 30 mensagens para não tomar rate-limit
+                if count % 30 == 0:
+                    await asyncio.sleep(0.5)
+            except discord.HTTPException as e:
+                print(f"⚠️ Erro ao deletar mensagem: {e}")
 
-                await ctx.send(f"🔍 Apagando minhas mensagens em {channel.recipient}...")
-                self.log(f"Apagando mensagens no canal {channel_id} (com {channel.recipient})")
+    await ctx.send(f"✅ Deletadas {count} mensagens suas em {channel.recipient}.")
 
-                count = 0
-                async for message in channel.history(limit=None):
-                    if message.author == bot.user:
-                        try:
-                            await message.delete()
-                            count += 1
-                            # Pequena pausa para evitar rate limit (opcional)
-                            await asyncio.sleep(0.2)
-                        except discord.HTTPException as e:
-                            self.log(f"Erro ao deletar mensagem: {e}")
-                            break
+# ============================================================
+# 3. INICIALIZAÇÃO
+# ============================================================
 
-                await ctx.send(f"✅ Deletadas {count} mensagens minhas no chat.")
-                self.log(f"Deletadas {count} mensagens.")
-            except Exception as e:
-                self.log(f"❌ Erro no comando: {e}")
-                await ctx.send(f"Erro: {e}")
-
-        # Rodar o bot
-        try:
-            bot.run(token, bot=True)  # self_bot já setado
-        except Exception as e:
-            self.log(f"❌ Falha ao iniciar bot: {e}")
-            self.start_button.config(state='normal', text='Iniciar Bot', bg='green')
-
-# Iniciar a interface
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = DiscordSelfBotGUI(root)
-    root.mainloop()
+    try:
+        bot.run(TOKEN)
+    except discord.LoginFailure:
+        print("❌ Token inválido. Verifique se você copiou corretamente.")
+    except KeyboardInterrupt:
+        print("\n👋 Bot encerrado pelo usuário.")
+    except Exception as e:
+        print(f"❌ Erro inesperado: {e}")
