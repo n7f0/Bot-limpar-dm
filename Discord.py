@@ -42,11 +42,6 @@ intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
-# CARGO PERMITIDO
-# ============================================================
-ALLOWED_ROLE_ID = 1524135748561801276
-
-# ============================================================
 # CONFIGURAÇÕES DE SEGURANÇA
 # ============================================================
 MIN_DELAY = 15.0
@@ -60,6 +55,7 @@ SLEEP_START_HOUR = 23
 SLEEP_END_HOUR = 7
 POST_TASK_REST_MIN = 5
 POST_TASK_REST_MAX = 15
+HEALTH_CHECK_INTERVAL = 300  # 5 minutos
 
 # ============================================================
 # BANCO DE DADOS (POSTGRESQL OU SQLITE)
@@ -87,7 +83,9 @@ def init_db():
                     auto_farming BOOLEAN DEFAULT FALSE,
                     farm_interval INTEGER DEFAULT 120,
                     farm_message TEXT,
-                    sleep_mode BOOLEAN DEFAULT FALSE
+                    sleep_mode BOOLEAN DEFAULT FALSE,
+                    last_health_check TIMESTAMP,
+                    token_valid BOOLEAN DEFAULT TRUE
                 )
             ''')
             conn.commit()
@@ -113,7 +111,9 @@ def init_db():
             auto_farming INTEGER DEFAULT 0,
             farm_interval INTEGER DEFAULT 120,
             farm_message TEXT,
-            sleep_mode INTEGER DEFAULT 0
+            sleep_mode INTEGER DEFAULT 0,
+            last_health_check TIMESTAMP,
+            token_valid INTEGER DEFAULT 1
         )
     ''')
     conn.commit()
@@ -139,10 +139,10 @@ def load_user_config(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     if DB_TYPE == 'postgres':
-        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s', (user_id,))
+        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode, token_valid FROM user_config WHERE user_id = %s', (user_id,))
         row = cursor.fetchone()
     else:
-        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode, token_valid FROM user_config WHERE user_id = ?', (user_id,))
         row = cursor.fetchone()
     conn.close()
     if row:
@@ -153,7 +153,8 @@ def load_user_config(user_id):
             'auto_farming': bool(row[3]),
             'farm_interval': row[4],
             'farm_message': row[5],
-            'sleep_mode': bool(row[6])
+            'sleep_mode': bool(row[6]),
+            'token_valid': bool(row[7]) if len(row) > 7 else True
         }
     return None
 
@@ -162,8 +163,8 @@ def save_user_config(user_id, data):
     cursor = conn.cursor()
     if DB_TYPE == 'postgres':
         cursor.execute('''
-            INSERT INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode, token_valid)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 token = EXCLUDED.token,
                 chat_id = EXCLUDED.chat_id,
@@ -171,7 +172,8 @@ def save_user_config(user_id, data):
                 auto_farming = EXCLUDED.auto_farming,
                 farm_interval = EXCLUDED.farm_interval,
                 farm_message = EXCLUDED.farm_message,
-                sleep_mode = EXCLUDED.sleep_mode
+                sleep_mode = EXCLUDED.sleep_mode,
+                token_valid = EXCLUDED.token_valid
         ''', (
             user_id,
             data.get('token'),
@@ -180,12 +182,13 @@ def save_user_config(user_id, data):
             data.get('auto_farming', False),
             data.get('farm_interval', 120),
             data.get('farm_message', ''),
-            data.get('sleep_mode', False)
+            data.get('sleep_mode', False),
+            data.get('token_valid', True)
         ))
     else:
         cursor.execute('''
-            INSERT OR REPLACE INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode, token_valid)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             user_id,
             data.get('token'),
@@ -194,7 +197,8 @@ def save_user_config(user_id, data):
             1 if data.get('auto_farming') else 0,
             data.get('farm_interval', 120),
             data.get('farm_message', ''),
-            1 if data.get('sleep_mode') else 0
+            1 if data.get('sleep_mode') else 0,
+            1 if data.get('token_valid') else 0
         ))
     conn.commit()
     conn.close()
@@ -220,8 +224,12 @@ def normal_random(mean: float, std: float, min_val: float = 0, max_val: float = 
     val = mean + std * z
     return max(min_val, min(val, max_val))
 
+def exponential_random(mean: float, min_val: float = 0, max_val: float = float('inf')) -> float:
+    val = random.expovariate(1.0 / mean) if mean > 0 else 0
+    return max(min_val, min(val, max_val))
+
 # ============================================================
-# GERENCIADOR DE FINGERPRINT
+# GERENCIADOR DE FINGERPRINT (ROTAÇÃO AUTOMÁTICA)
 # ============================================================
 class FingerprintManager:
     CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
@@ -234,6 +242,7 @@ class FingerprintManager:
         self.base = self._generate()
         self.current = self.base.copy()
         self.last_rotate = time.time()
+        self.rotate_interval = random.uniform(1800, 7200)
 
     def _generate(self):
         chrome = random.choice(self.CHROME_VERSIONS)
@@ -259,6 +268,8 @@ class FingerprintManager:
         }
 
     def get(self, vary: bool = True):
+        if time.time() - self.last_rotate > self.rotate_interval:
+            self.rotate()
         if vary:
             fp = self.base.copy()
             fp['client_build_number'] = self.base['client_build_number'] + random.randint(-50, 50)
@@ -273,6 +284,9 @@ class FingerprintManager:
         self.base = self._generate()
         self.current = self.base.copy()
         self.session_id = secrets.token_hex(32)
+        self.device_id = secrets.token_hex(32)
+        self.last_rotate = time.time()
+        self.rotate_interval = random.uniform(1800, 7200)
 
     def get_context_headers(self):
         context = {
@@ -285,7 +299,7 @@ class FingerprintManager:
 fingerprint_mgr = FingerprintManager()
 
 # ============================================================
-# SESSÃO CURL_CFFI + HEADERS
+# SESSÃO CURL_CFFI + HEADERS REALISTAS
 # ============================================================
 def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) -> dict:
     fp = fingerprint_mgr.get(vary=vary_fingerprint)
@@ -318,7 +332,7 @@ def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) ->
 session = AsyncSession(impersonate="chrome120")
 
 # ============================================================
-# WARMUP
+# WARMUP AVANÇADO
 # ============================================================
 warmup_done = False
 
@@ -331,6 +345,8 @@ async def warmup(force=False):
         await session.get("https://discord.com", headers=headers)
         await session.get("https://discord.com/api/v9/experiments", headers=headers)
         await session.get("https://discord.com/api/v9/gateway", headers=headers)
+        await session.get("https://discord.com/api/v9/applications/", headers=headers)
+        await session.get("https://discord.com/api/v9/science", headers=headers)
         warmup_done = True
         print("✅ Warmup avançado concluído.")
     except Exception as e:
@@ -359,13 +375,16 @@ def get_user(user_id):
                 'farm_message': config['farm_message'],
                 'gateway_task': None,
                 'science_task': None,
+                'health_task': None,
                 'gateway_ws': None,
                 'gateway_stop': False,
                 'science_stop': False,
                 'sleep_mode': config['sleep_mode'],
+                'token_valid': config.get('token_valid', True),
                 'last_activity': time.time(),
                 'account_healthy': True,
                 'resting_until': 0,
+                'rate_limits': {},
             }
         else:
             user_data[user_id] = {
@@ -382,13 +401,16 @@ def get_user(user_id):
                 'farm_message': '',
                 'gateway_task': None,
                 'science_task': None,
+                'health_task': None,
                 'gateway_ws': None,
                 'gateway_stop': False,
                 'science_stop': False,
                 'sleep_mode': False,
+                'token_valid': True,
                 'last_activity': time.time(),
                 'account_healthy': True,
                 'resting_until': 0,
+                'rate_limits': {},
             }
     return user_data[user_id]
 
@@ -401,7 +423,8 @@ def save_user_to_db(user_id):
         'auto_farming': data['auto_farming'],
         'farm_interval': data['farm_interval'],
         'farm_message': data['farm_message'],
-        'sleep_mode': data['sleep_mode']
+        'sleep_mode': data['sleep_mode'],
+        'token_valid': data.get('token_valid', True)
     })
 
 # ============================================================
@@ -442,19 +465,33 @@ async def check_account_health(user_id: int) -> bool:
     data = get_user(user_id)
     token = data.get('token')
     if not token:
+        data['token_valid'] = False
         return False
     headers = build_headers({"Authorization": token})
     try:
         resp = await session.get("https://discord.com/api/v10/users/@me", headers=headers)
         if resp.status_code == 200:
+            data['token_valid'] = True
             data['account_healthy'] = True
+            update_user_field(user_id, 'token_valid', True if DB_TYPE == 'postgres' else 1)
             return True
         else:
+            data['token_valid'] = False
             data['account_healthy'] = False
+            update_user_field(user_id, 'token_valid', False if DB_TYPE == 'postgres' else 0)
             return False
-    except:
+    except Exception as e:
+        data['token_valid'] = False
         data['account_healthy'] = False
         return False
+
+async def periodic_health_check(user_id: int):
+    while True:
+        await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+        data = get_user(user_id)
+        if data.get('gateway_stop', False):
+            break
+        await check_account_health(user_id)
 
 async def post_task_rest(user_id: int):
     data = get_user(user_id)
@@ -468,35 +505,51 @@ async def check_resting(user_id: int) -> bool:
     data = get_user(user_id)
     return data['resting_until'] > time.time()
 
+async def simulate_navigation(user_id: int, token: str):
+    if random.random() < 0.1:
+        headers = build_headers({"Authorization": token})
+        try:
+            await session.get("https://discord.com/api/v9/users/@me/settings", headers=headers)
+            await session.get("https://discord.com/api/v9/users/@me/connections", headers=headers)
+            await asyncio.sleep(random.uniform(1.0, 3.0))
+        except:
+            pass
+
 # ============================================================
-# REQUEST COM RATE‑LIMIT
+# REQUEST COM RATE‑LIMIT ADAPTATIVO
 # ============================================================
 async def request_with_rate_limit(method: str, url: str, headers: dict = None, json_data: dict = None, **kwargs):
     if not headers:
         headers = build_headers()
     resp = await session.request(method, url, headers=headers, json=json_data, **kwargs)
 
+    remaining = resp.headers.get('X-RateLimit-Remaining')
+    reset_after = resp.headers.get('X-RateLimit-Reset-After')
+    global_limit = resp.headers.get('X-RateLimit-Global')
+    bucket = resp.headers.get('X-RateLimit-Bucket')
+
     if resp.status_code == 429:
         retry_after = float(resp.headers.get('Retry-After', 5))
-        global_limit = resp.headers.get('X-RateLimit-Global')
         if global_limit and global_limit.lower() == 'true':
-            await asyncio.sleep(retry_after + random.uniform(0.5, 2.0))
+            wait = retry_after + random.uniform(0.5, 2.0) + exponential_random(5, 0, 10)
+            await asyncio.sleep(wait)
         else:
-            await asyncio.sleep(retry_after + random.uniform(0.5, 1.5))
+            wait = retry_after + random.uniform(0.5, 1.5)
+            await asyncio.sleep(wait)
         return await request_with_rate_limit(method, url, headers, json_data, **kwargs)
 
-    remaining = resp.headers.get('X-RateLimit-Remaining')
     if remaining is not None and int(remaining) < 5:
-        await asyncio.sleep(random.uniform(1.0, 3.0))
+        wait = random.uniform(1.0, 5.0) + exponential_random(2, 0, 10)
+        await asyncio.sleep(wait)
 
     return resp
 
 # ============================================================
-# SIMULAÇÕES
+# SIMULAÇÕES (DIGITAÇÃO, ACK, REAÇÕES)
 # ============================================================
 async def simulate_typing(channel_id: int, token: str, duration: float = None):
     if duration is None:
-        duration = random.uniform(1.5, 4.0)
+        duration = normal_random(2.5, 0.8, min_val=0.8, max_val=6.0)
     headers = build_headers({"Authorization": token, "Content-Type": "application/json"})
     url = f"https://discord.com/api/v10/channels/{channel_id}/typing"
     try:
@@ -526,7 +579,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP)
+# GERENCIADOR DE VOZ (UDP/RTP) – CORRIGIDO
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -538,46 +591,53 @@ class VoiceConnection:
         self.sequence = 0
         self.timestamp = 0
         self.is_running = False
+        self.udp_task = None
 
     async def start(self):
-        ready_msg = await self.ws.receive()
-        data = json.loads(ready_msg.data)
-        if data.get('op') == 2:
-            ip = data['d']['ip']
-            port = data['d']['port']
-            self.ssrc = data['d']['ssrc']
-            modes = data['d']['modes']
-            mode = modes[0] if modes else 'xsalsa20_poly1305'
+        try:
+            ready_msg = await self.ws.receive()
+            data = json.loads(ready_msg.data)
+            if data.get('op') == 2:  # READY
+                ip = data['d']['ip']
+                port = data['d']['port']
+                self.ssrc = data['d']['ssrc']
+                modes = data['d']['modes']
+                mode = modes[0] if modes else 'xsalsa20_poly1305'
 
-            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.settimeout(1.0)
+                self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.udp_socket.settimeout(2.0)
 
-            packet = bytearray(74)
-            struct.pack_into('>I', packet, 0, self.ssrc)
-            self.udp_socket.sendto(packet, (ip, port))
+                packet = bytearray(74)
+                struct.pack_into('>I', packet, 0, self.ssrc)
+                self.udp_socket.sendto(packet, (ip, port))
 
-            resp, _ = self.udp_socket.recvfrom(74)
-            external_ip = resp[8:].decode().split('\x00', 1)[0]
-            external_port = struct.unpack('>H', resp[4:6])[0]
+                resp, _ = self.udp_socket.recvfrom(74)
+                external_ip = resp[8:].decode().split('\x00', 1)[0]
+                external_port = struct.unpack('>H', resp[4:6])[0]
 
-            await self.ws.send(json.dumps({
-                "op": 1,
-                "d": {
-                    "protocol": "udp",
-                    "data": {
-                        "address": external_ip,
-                        "port": external_port,
-                        "mode": mode
+                await self.ws.send(json.dumps({
+                    "op": 1,
+                    "d": {
+                        "protocol": "udp",
+                        "data": {
+                            "address": external_ip,
+                            "port": external_port,
+                            "mode": mode
+                        }
                     }
-                }
-            }))
+                }))
 
-            self.is_running = True
-            asyncio.create_task(self._udp_heartbeat())
+                self.is_running = True
+                self.udp_task = asyncio.create_task(self._udp_heartbeat())
+                print(f"✅ Voice UDP iniciado para {self.user_id} (SSRC: {self.ssrc})")
+                return True
+        except Exception as e:
+            print(f"❌ Erro ao iniciar conexão de voz: {e}")
+            return False
 
     async def _udp_heartbeat(self):
-        while self.is_running:
-            if self.udp_socket:
+        while self.is_running and self.udp_socket:
+            try:
                 header = bytearray(12)
                 header[0] = 0x80
                 header[1] = 0x78
@@ -586,16 +646,21 @@ class VoiceConnection:
                 struct.pack_into('>I', header, 8, self.ssrc)
                 self.sequence += 1
                 self.timestamp += 960
-                try:
-                    self.udp_socket.sendto(header, (self.udp_socket.getpeername()[0], self.udp_socket.getpeername()[1]))
-                except:
-                    pass
-            await asyncio.sleep(random.uniform(4.5, 6.0))
+                self.udp_socket.sendto(header, (self.udp_socket.getpeername()[0], self.udp_socket.getpeername()[1]))
+            except Exception as e:
+                print(f"⚠️ Erro no UDP heartbeat: {e}")
+            wait = random.uniform(4.0, 8.0)
+            await asyncio.sleep(wait)
 
     def stop(self):
         self.is_running = False
+        if self.udp_task and not self.udp_task.done():
+            self.udp_task.cancel()
         if self.udp_socket:
-            self.udp_socket.close()
+            try:
+                self.udp_socket.close()
+            except:
+                pass
 
 # ============================================================
 # GATEWAY (PRESENÇA COM ALTERNÂNCIA AFK)
@@ -603,7 +668,7 @@ class VoiceConnection:
 async def gateway_presence(user_id: int):
     data = get_user(user_id)
     token = data['token']
-    if not token:
+    if not token or not data.get('token_valid', True):
         return
 
     fingerprint_mgr.rotate()
@@ -642,8 +707,9 @@ async def gateway_presence(user_id: int):
                 afk_since = None
 
                 while not data.get('gateway_stop', False):
-                    mean_interval = base_interval + 0.1
-                    adjusted_interval = normal_random(mean_interval, 0.05 * mean_interval, min_val=10.0)
+                    mean_interval = base_interval + random.uniform(0.05, 0.15)
+                    std = 0.05 * mean_interval
+                    adjusted_interval = normal_random(mean_interval, std, min_val=10.0)
                     if data.get('sleep_mode', False):
                         adjusted_interval *= 2.0
                     await asyncio.sleep(adjusted_interval)
@@ -672,7 +738,7 @@ async def gateway_presence(user_id: int):
                         except:
                             pass
         except Exception as e:
-            print(f"Gateway error: {e}")
+            print(f"Gateway error for {user_id}: {e}")
         finally:
             data['gateway_ws'] = None
             data['gateway_task'] = None
@@ -697,11 +763,11 @@ def stop_gateway(user_id: int):
 async def science_telemetry(user_id: int):
     data = get_user(user_id)
     token = data['token']
-    if not token:
+    if not token or not data.get('token_valid', True):
         return
 
-    fake_guilds = [str(random.randint(100000000000000000, 999999999999999999)) for _ in range(5)]
-    fake_channels = [str(random.randint(100000000000000000, 999999999999999999)) for _ in range(5)]
+    fake_guilds = [str(random.randint(100000000000000000, 999999999999999999)) for _ in range(10)]
+    fake_channels = [str(random.randint(100000000000000000, 999999999999999999)) for _ in range(10)]
 
     while not data.get('science_stop', False):
         if await check_sleep_mode(user_id):
@@ -711,7 +777,10 @@ async def science_telemetry(user_id: int):
         guild_id = random.choice(fake_guilds)
         channel_id = random.choice(fake_channels)
 
-        event_type = random.choice(["client_activity", "mouse_move", "channel_switch", "guild_switch", "message_read", "read_state"])
+        event_types = ["client_activity", "mouse_move", "channel_switch", "guild_switch", "message_read", "read_state"]
+        weights = [0.3, 0.3, 0.1, 0.1, 0.1, 0.1]
+        event_type = random.choices(event_types, weights=weights)[0]
+
         if event_type in ("mouse_move", "client_activity"):
             x = random.randint(0, 1920)
             y = random.randint(0, 1080)
@@ -759,13 +828,14 @@ def stop_science(user_id: int):
 async def perform_schedule(token, chat_id, message, delay_sec):
     await asyncio.sleep(delay_sec)
     headers = build_headers({"Authorization": token, "Content-Type": "application/json"})
-    await simulate_typing(chat_id, token, duration=random.uniform(1.0, 3.0))
+    await simulate_typing(chat_id, token, duration=normal_random(2.0, 0.6, min_val=0.8, max_val=5.0))
     payload = {'content': message, 'nonce': str(generate_snowflake())}
     await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{chat_id}/messages',
                                   headers=headers, json_data=payload)
 
 async def perform_auto_farm(user_id, message, interval_sec):
     data = get_user(user_id)
+    message_counter = 0
     while data['auto_farming'] and not data['farm_cancel'].is_set():
         if await check_sleep_mode(user_id):
             while await check_sleep_mode(user_id):
@@ -774,24 +844,37 @@ async def perform_auto_farm(user_id, message, interval_sec):
         if await check_resting(user_id):
             await asyncio.sleep(30)
             continue
+        if not data.get('token_valid', True):
+            await asyncio.sleep(60)
+            continue
 
-        # Usa farm_chat_id se existir, senão usa chat_id (fallback)
         chat_id = data.get('farm_chat_id') or data.get('chat_id')
         if not chat_id:
             await asyncio.sleep(60)
             continue
 
+        if random.random() < 0.2:
+            emojis = [" 👍", " ❤️", " 😂", " ✨", " 🔥", " 👀", ""]
+            msg = message + random.choice(emojis)
+        else:
+            msg = message
+
         headers = build_headers({"Authorization": data['token'], "Content-Type": "application/json"})
-        await simulate_typing(chat_id, data['token'], duration=random.uniform(1.0, 4.0))
-        payload = {'content': message, 'nonce': str(generate_snowflake())}
+        await simulate_typing(chat_id, data['token'], duration=normal_random(2.5, 0.8, min_val=1.0, max_val=5.0))
+        payload = {'content': msg, 'nonce': str(generate_snowflake())}
         try:
             await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{chat_id}/messages',
                                           headers=headers, json_data=payload)
+            message_counter += 1
         except:
             pass
 
+        if message_counter % 5 == 0:
+            pausa = exponential_random(60, min_val=30, max_val=120)
+            await asyncio.sleep(pausa)
+
         mean_interval = interval_sec
-        std = 0.1 * mean_interval
+        std = 0.15 * mean_interval
         real_interval = normal_random(mean_interval, std, min_val=15)
         await asyncio.sleep(real_interval)
 
@@ -800,6 +883,7 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
     last_id = None
     messages_str = []
     msg_ids = []
+    page_count = 0
 
     await interaction.response.defer(ephemeral=False)
     prog_msg = await interaction.followup.send(f'🔄 **Backup Stealth Iniciado.** Limite: {MAX_BACKUP} msgs.')
@@ -809,7 +893,6 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
 
     await asyncio.sleep(random.uniform(2.0, 5.0))
 
-    page_count = 0
     while len(messages_str) < MAX_BACKUP:
         if await check_sleep_mode(interaction.user.id):
             await prog_msg.edit(content='💤 **Modo sono – backup pausado.**')
@@ -817,6 +900,9 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
                 await asyncio.sleep(60)
             await prog_msg.edit(content='🔄 **Retomando backup...**')
             continue
+        if not get_user(interaction.user.id).get('token_valid', True):
+            await prog_msg.edit(content='⚠️ Token inválido – backup interrompido.')
+            break
 
         url = f'https://discord.com/api/v10/channels/{chat_id}/messages?limit=100'
         if last_id:
@@ -843,9 +929,12 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
             ack_msg = random.choice(msg_ids)
             await send_message_ack(chat_id, ack_msg, token, mention_count=0)
 
-        if msg_ids and random.random() < 0.2:
+        if msg_ids and random.random() < 0.15:
             react_msg = random.choice(msg_ids)
             await random_reaction(chat_id, react_msg, token)
+
+        if page_count % 5 == 0:
+            await simulate_navigation(interaction.user.id, token)
 
         read_time = normal_random(5.0, 1.5, min_val=2.0, max_val=10.0)
         await asyncio.sleep(read_time)
@@ -868,6 +957,9 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
 
 async def perform_clone(user_id, target_id, progress_msg):
     data = get_user(user_id)
+    if not data.get('token_valid', True):
+        return await progress_msg.edit(content='❌ Token inválido ou conta restrita.')
+
     headers = build_headers({"Authorization": data['token']})
 
     resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/users/{target_id}', headers=headers)
@@ -908,6 +1000,10 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     last_id = None
     start_time = time.time()
 
+    if not data.get('token_valid', True):
+        await progress_msg.edit(content='❌ Token inválido – limpeza interrompida.')
+        return
+
     start_gateway(interaction.user.id)
     start_science(interaction.user.id)
 
@@ -925,6 +1021,9 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
         if await check_resting(interaction.user.id):
             await asyncio.sleep(30)
             continue
+        if not data.get('token_valid', True):
+            await progress_msg.edit(content='⚠️ Token inválido – limpeza interrompida.')
+            break
 
         url = f'https://discord.com/api/v10/channels/{chat_id}/messages?limit=100'
         if last_id:
@@ -948,7 +1047,7 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
                 if del_resp.status_code == 204:
                     messages_deleted += 1
                     if messages_deleted % PAUSE_AFTER == 0:
-                        pausa = random.uniform(PAUSE_DUR_MIN, PAUSE_DUR_MAX)
+                        pausa = random.uniform(PAUSE_DUR_MIN, PAUSE_DUR_MAX) + exponential_random(30, 0, 60)
                         await progress_msg.edit(content=f'⏸️ **Pausa humana...** {int(pausa)}s.')
                         await asyncio.sleep(pausa)
                     elif messages_deleted % 3 == 0:
@@ -975,24 +1074,32 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     await progress_msg.edit(content=f'✅ **Limpeza finalizada.** Deletadas: {messages_deleted}. Tempo: {int(time.time()-start_time)}s.')
     await post_task_rest(interaction.user.id)
 
+# ============================================================
+# PERFORM VOICE FARM – CORRIGIDO
+# ============================================================
 async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     data = get_user(user_id)
     token = data['token']
+    if not data.get('token_valid', True):
+        return await progress_msg.edit(content='❌ Token inválido – não é possível entrar na call.')
     headers = build_headers({"Authorization": token})
 
     async with aiohttp.ClientSession() as aio_session:
+        # 1. Obter informações do canal de voz
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
         if resp.status_code != 200:
-            return await progress_msg.edit(content='❌ Erro ao acessar o canal.')
+            return await progress_msg.edit(content=f'❌ Erro ao acessar o canal (status {resp.status_code}).')
         channel_data = resp.json()
         guild_id = channel_data.get('guild_id')
         if not guild_id:
             return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
+        # 2. Conectar ao WebSocket de voz
         voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
         hello = await voice_ws.receive_json()
         base_interval = hello['d']['heartbeat_interval'] / 1000.0
 
+        # 3. Enviar Identify
         await voice_ws.send_json({
             "op": 2,
             "d": {
@@ -1000,8 +1107,9 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
                 "properties": fingerprint_mgr.get(vary=False)
             }
         })
-        await voice_ws.receive_json()
+        await voice_ws.receive_json()  # Ready
 
+        # 4. Conectar ao canal de voz
         await voice_ws.send_json({
             "op": 4,
             "d": {
@@ -1012,28 +1120,61 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
             }
         })
 
+        # 5. Iniciar conexão UDP
         voice = VoiceConnection(user_id, voice_ws, token)
-        await voice.start()
+        if not await voice.start():
+            await voice_ws.close()
+            return await progress_msg.edit(content='❌ Falha ao estabelecer conexão UDP.')
 
         await progress_msg.edit(content=f'✅ **Na call com RTP ativo por {hours}h**')
+        print(f"📞 Utilizador {user_id} entrou na call por {hours}h")
 
         end_time = time.time() + (hours * 3600)
+        last_heartbeat = time.time()
+        last_log = time.time()
+
+        # 6. Loop principal
         while time.time() < end_time and not data['call_cancel'].is_set():
             if await check_sleep_mode(user_id):
-                break
-            try:
-                msg = await asyncio.wait_for(voice_ws.receive(), timeout=30)
-                if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                    break
-            except asyncio.TimeoutError:
-                await voice_ws.send_json({"op": 1, "d": None})
-            except:
+                print(f"💤 Modo sono ativado – saindo da call para {user_id}")
                 break
 
+            if not data.get('token_valid', True):
+                print(f"⚠️ Token inválido – saindo da call para {user_id}")
+                break
+
+            if time.time() - last_log > 60:
+                remaining = max(0, int((end_time - time.time()) / 60))
+                await progress_msg.edit(content=f'🎧 **Na call** – faltam `{remaining}` minutos.')
+                last_log = time.time()
+
+            try:
+                msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
+                if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                    print(f"⚠️ WebSocket de voz fechado (tipo {msg.type}) para {user_id}")
+                    break
+            except asyncio.TimeoutError:
+                try:
+                    await voice_ws.send_json({"op": 1, "d": None})
+                    last_heartbeat = time.time()
+                except Exception as e:
+                    print(f"⚠️ Erro ao enviar heartbeat de voz: {e}")
+                    break
+            except Exception as e:
+                print(f"❌ Exceção no loop de voz: {e}")
+                break
+
+            await asyncio.sleep(1.0)
+
+        # 7. Limpeza
         voice.stop()
-        await voice_ws.close()
+        try:
+            await voice_ws.close()
+        except:
+            pass
         data['farming_call'] = False
         await progress_msg.edit(content='⏹️ **Call encerrada.**')
+        print(f"📞 Utilizador {user_id} saiu da call.")
         await post_task_rest(user_id)
 
 # ============================================================
@@ -1045,11 +1186,14 @@ class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
         user_id = interaction.user.id
         data = get_user(user_id)
         data['token'] = self.token_input.value.strip()
+        data['token_valid'] = True
         save_user_to_db(user_id)
         await interaction.response.send_message('✅ Token configurado e salvo no banco!', ephemeral=True)
         await warmup()
         start_gateway(user_id)
         start_science(user_id)
+        if data.get('health_task') is None or data['health_task'].done():
+            data['health_task'] = asyncio.create_task(periodic_health_check(user_id))
         healthy = await check_account_health(user_id)
         if not healthy:
             await interaction.followup.send('⚠️ Token parece inválido ou conta restrita.', ephemeral=True)
@@ -1062,9 +1206,12 @@ class ClearTokenModal(discord.ui.Modal, title='🗑️ Limpar Token'):
         user_id = interaction.user.id
         data = get_user(user_id)
         data['token'] = None
+        data['token_valid'] = False
         save_user_to_db(user_id)
         stop_gateway(user_id)
         stop_science(user_id)
+        if data.get('health_task') and not data['health_task'].done():
+            data['health_task'].cancel()
         await interaction.response.send_message('✅ Token removido com sucesso!', ephemeral=True)
 
 class SetChatModal(discord.ui.Modal, title='💬 Definir Canal (Limpeza/Backup)'):
@@ -1077,8 +1224,8 @@ class SetChatModal(discord.ui.Modal, title='💬 Definir Canal (Limpeza/Backup)'
             return await interaction.response.send_message('❌ ID inválido. Apenas números.', ephemeral=True)
 
         data = get_user(user_id)
-        if not data.get('token'):
-            return await interaction.response.send_message('❌ Configure o token primeiro.', ephemeral=True)
+        if not data.get('token') or not data.get('token_valid', True):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
 
         headers = build_headers({"Authorization": data['token']})
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{chat_id}', headers=headers)
@@ -1099,8 +1246,8 @@ class SetFarmChatModal(discord.ui.Modal, title='💬 Definir Canal para Farm'):
             return await interaction.response.send_message('❌ ID inválido. Apenas números.', ephemeral=True)
 
         data = get_user(user_id)
-        if not data.get('token'):
-            return await interaction.response.send_message('❌ Configure o token primeiro.', ephemeral=True)
+        if not data.get('token') or not data.get('token_valid', True):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
 
         headers = build_headers({"Authorization": data['token']})
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{chat_id}', headers=headers)
@@ -1109,7 +1256,6 @@ class SetFarmChatModal(discord.ui.Modal, title='💬 Definir Canal para Farm'):
 
         data['farm_chat_id'] = chat_id
         save_user_to_db(user_id)
-        # Se mensagem já estiver definida, inicia farm
         if data.get('farm_message'):
             data['auto_farming'] = True
             data['farm_cancel'] = asyncio.Event()
@@ -1133,11 +1279,13 @@ class ScheduleModal(discord.ui.Modal, title='⏰ Agendar Mensagem (Farm)'):
             return await interaction.response.send_message('🛡️ **Anti-Ban:** Mínimo 15 minutos.', ephemeral=True)
 
         data = get_user(user_id)
+        if not data.get('token_valid', True):
+            return await interaction.response.send_message('❌ Token inválido.', ephemeral=True)
+
         data['farm_message'] = self.msg_input.value
         data['farm_interval'] = int(interval_min * 60)
         save_user_to_db(user_id)
 
-        # Se canal de farm já estiver definido, inicia
         if data.get('farm_chat_id'):
             data['auto_farming'] = True
             data['farm_cancel'] = asyncio.Event()
@@ -1170,6 +1318,9 @@ class CallModal(discord.ui.Modal, title='🎧 Configurar Call'):
             return await interaction.response.send_message('❌ Valores inválidos.', ephemeral=True)
 
         data = get_user(interaction.user.id)
+        if not data.get('token_valid', True):
+            return await interaction.response.send_message('❌ Token inválido.', ephemeral=True)
+
         data['farming_call'] = True
         data['call_cancel'] = asyncio.Event()
 
@@ -1259,6 +1410,7 @@ class ConfigButtonStatus(discord.ui.Button):
         await interaction.response.send_message(
             f"**Configurações atuais:**\n"
             f"Token: {'✅ configurado' if data['token'] else '❌ não definido'}\n"
+            f"Token válido: {'✅ sim' if data.get('token_valid', False) else '❌ não'}\n"
             f"Canal Limpeza/Backup: {data['chat_id'] or '❌ não definido'}\n"
             f"Canal Farm: {data['farm_chat_id'] or '❌ não definido'}\n"
             f"Mensagem Farm: {data['farm_message'] or '❌ não definida'}\n"
@@ -1287,12 +1439,12 @@ class CleanButtonStart(discord.ui.Button):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
-        if not data['token'] or not data['chat_id']:
-            return await interaction.response.send_message('❌ Configure Token e Canal primeiro.', ephemeral=True)
+        if not data['token'] or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
+        if not data['chat_id']:
+            return await interaction.response.send_message('❌ Defina o Canal primeiro.', ephemeral=True)
         if data['cleaning']:
             return await interaction.response.send_message('⏳ Já em execução.', ephemeral=True)
-        if not await check_account_health(self.user_id):
-            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
         data['cleaning'] = True
         data['clean_cancel'] = asyncio.Event()
         await interaction.response.defer()
@@ -1322,10 +1474,10 @@ class BackupButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
-        if not data['token'] or not data['chat_id']:
-            return await interaction.response.send_message('❌ Configure Token e Canal primeiro.', ephemeral=True)
-        if not await check_account_health(self.user_id):
-            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
+        if not data['token'] or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
+        if not data['chat_id']:
+            return await interaction.response.send_message('❌ Defina o Canal primeiro.', ephemeral=True)
         bot.loop.create_task(perform_backup(interaction, data['token'], data['chat_id']))
 
 # ---------- BOTÕES FARM ----------
@@ -1337,8 +1489,9 @@ class FarmButtonSetMessage(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['token']:
-            return await interaction.response.send_message('❌ Configure o Token primeiro.', ephemeral=True)
+        data = get_user(self.user_id)
+        if not data.get('token') or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
         await interaction.response.send_modal(ScheduleModal())
 
 class FarmButtonSetChat(discord.ui.Button):
@@ -1349,8 +1502,9 @@ class FarmButtonSetChat(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['token']:
-            return await interaction.response.send_message('❌ Configure o Token primeiro.', ephemeral=True)
+        data = get_user(self.user_id)
+        if not data.get('token') or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
         await interaction.response.send_modal(SetFarmChatModal())
 
 # ---------- BOTÃO PERFIL ----------
@@ -1362,8 +1516,9 @@ class ProfileButtonClone(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['token']:
-            return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
+        data = get_user(self.user_id)
+        if not data.get('token') or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
         await interaction.response.send_modal(CloneModal())
 
 # ---------- BOTÕES VOZ ----------
@@ -1375,8 +1530,9 @@ class VoiceButtonCall(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['token']:
-            return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
+        data = get_user(self.user_id)
+        if not data.get('token') or not data.get('token_valid', False):
+            return await interaction.response.send_message('❌ Token não configurado ou inválido.', ephemeral=True)
         await interaction.response.send_modal(CallModal())
 
 class VoiceButtonStop(discord.ui.Button):
@@ -1393,42 +1549,10 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# VERIFICAÇÃO DE CARGO
-# ============================================================
-async def check_user_role(interaction: discord.Interaction) -> bool:
-    if interaction.guild is None:
-        await interaction.response.send_message(
-            "❌ Este comando só pode ser usado num servidor com o cargo adequado.",
-            ephemeral=True
-        )
-        return False
-
-    member = interaction.user
-    role = interaction.guild.get_role(ALLOWED_ROLE_ID)
-    if role is None:
-        await interaction.response.send_message(
-            "❌ O cargo de permissão não existe neste servidor.",
-            ephemeral=True
-        )
-        return False
-
-    if role not in member.roles:
-        await interaction.response.send_message(
-            f"❌ Você não tem o cargo <@&{ALLOWED_ROLE_ID}> necessário.",
-            ephemeral=True
-        )
-        return False
-
-    return True
-
-# ============================================================
-# COMANDO PRINCIPAL
+# COMANDO PRINCIPAL (QUALQUER PESSOA PODE USAR)
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
-    if not await check_user_role(interaction):
-        return
-
     await warmup()
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
