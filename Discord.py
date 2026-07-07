@@ -38,11 +38,11 @@ if not TOKEN_BOT:
     exit(1)
 
 intents = discord.Intents.default()
-intents.members = True  # Necessário para verificar cargos com precisão
+intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
-# CARGO PERMITIDO (ID)
+# CARGO PERMITIDO
 # ============================================================
 ALLOWED_ROLE_ID = 1524135748561801276
 
@@ -64,7 +64,7 @@ POST_TASK_REST_MAX = 15
 # ============================================================
 # BANCO DE DADOS (POSTGRESQL OU SQLITE)
 # ============================================================
-DB_TYPE = None  # 'postgres' ou 'sqlite'
+DB_TYPE = None
 
 def init_db():
     global DB_TYPE
@@ -83,6 +83,7 @@ def init_db():
                     user_id BIGINT PRIMARY KEY,
                     token TEXT,
                     chat_id BIGINT,
+                    farm_chat_id BIGINT,
                     auto_farming BOOLEAN DEFAULT FALSE,
                     farm_interval INTEGER DEFAULT 120,
                     farm_message TEXT,
@@ -99,7 +100,7 @@ def init_db():
             print(f"⚠️ Erro ao conectar ao PostgreSQL: {e}")
             print("⚠️ Usando SQLite como fallback.")
 
-    # Fallback para SQLite
+    # Fallback SQLite
     DB_TYPE = 'sqlite'
     conn = sqlite3.connect('config.db')
     cursor = conn.cursor()
@@ -108,6 +109,7 @@ def init_db():
             user_id INTEGER PRIMARY KEY,
             token TEXT,
             chat_id INTEGER,
+            farm_chat_id INTEGER,
             auto_farming INTEGER DEFAULT 0,
             farm_interval INTEGER DEFAULT 120,
             farm_message TEXT,
@@ -137,20 +139,21 @@ def load_user_config(user_id):
     conn = get_db_connection()
     cursor = conn.cursor()
     if DB_TYPE == 'postgres':
-        cursor.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s', (user_id,))
+        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s', (user_id,))
         row = cursor.fetchone()
     else:
-        cursor.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
+        cursor.execute('SELECT token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
         row = cursor.fetchone()
     conn.close()
     if row:
         return {
             'token': row[0],
             'chat_id': row[1],
-            'auto_farming': bool(row[2]),
-            'farm_interval': row[3],
-            'farm_message': row[4],
-            'sleep_mode': bool(row[5])
+            'farm_chat_id': row[2],
+            'auto_farming': bool(row[3]),
+            'farm_interval': row[4],
+            'farm_message': row[5],
+            'sleep_mode': bool(row[6])
         }
     return None
 
@@ -159,11 +162,12 @@ def save_user_config(user_id, data):
     cursor = conn.cursor()
     if DB_TYPE == 'postgres':
         cursor.execute('''
-            INSERT INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            INSERT INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
             ON CONFLICT (user_id) DO UPDATE SET
                 token = EXCLUDED.token,
                 chat_id = EXCLUDED.chat_id,
+                farm_chat_id = EXCLUDED.farm_chat_id,
                 auto_farming = EXCLUDED.auto_farming,
                 farm_interval = EXCLUDED.farm_interval,
                 farm_message = EXCLUDED.farm_message,
@@ -172,6 +176,7 @@ def save_user_config(user_id, data):
             user_id,
             data.get('token'),
             data.get('chat_id'),
+            data.get('farm_chat_id'),
             data.get('auto_farming', False),
             data.get('farm_interval', 120),
             data.get('farm_message', ''),
@@ -179,12 +184,13 @@ def save_user_config(user_id, data):
         ))
     else:
         cursor.execute('''
-            INSERT OR REPLACE INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT OR REPLACE INTO user_config (user_id, token, chat_id, farm_chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
             user_id,
             data.get('token'),
             data.get('chat_id'),
+            data.get('farm_chat_id'),
             1 if data.get('auto_farming') else 0,
             data.get('farm_interval', 120),
             data.get('farm_message', ''),
@@ -342,6 +348,7 @@ def get_user(user_id):
             user_data[user_id] = {
                 'token': config['token'],
                 'chat_id': config['chat_id'],
+                'farm_chat_id': config['farm_chat_id'],
                 'cleaning': False,
                 'clean_cancel': None,
                 'farming_call': False,
@@ -364,6 +371,7 @@ def get_user(user_id):
             user_data[user_id] = {
                 'token': None,
                 'chat_id': None,
+                'farm_chat_id': None,
                 'cleaning': False,
                 'clean_cancel': None,
                 'farming_call': False,
@@ -389,6 +397,7 @@ def save_user_to_db(user_id):
     save_user_config(user_id, {
         'token': data['token'],
         'chat_id': data['chat_id'],
+        'farm_chat_id': data['farm_chat_id'],
         'auto_farming': data['auto_farming'],
         'farm_interval': data['farm_interval'],
         'farm_message': data['farm_message'],
@@ -766,11 +775,17 @@ async def perform_auto_farm(user_id, message, interval_sec):
             await asyncio.sleep(30)
             continue
 
+        # Usa farm_chat_id se existir, senão usa chat_id (fallback)
+        chat_id = data.get('farm_chat_id') or data.get('chat_id')
+        if not chat_id:
+            await asyncio.sleep(60)
+            continue
+
         headers = build_headers({"Authorization": data['token'], "Content-Type": "application/json"})
-        await simulate_typing(data['chat_id'], data['token'], duration=random.uniform(1.0, 4.0))
+        await simulate_typing(chat_id, data['token'], duration=random.uniform(1.0, 4.0))
         payload = {'content': message, 'nonce': str(generate_snowflake())}
         try:
-            await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{data["chat_id"]}/messages',
+            await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{chat_id}/messages',
                                           headers=headers, json_data=payload)
         except:
             pass
@@ -1037,10 +1052,23 @@ class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
         start_science(user_id)
         healthy = await check_account_health(user_id)
         if not healthy:
-            await interaction.followup.send('⚠️ Token parece inválido ou conta restrita. Verifique se é um token de usuário (não de bot).', ephemeral=True)
+            await interaction.followup.send('⚠️ Token parece inválido ou conta restrita.', ephemeral=True)
 
-class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
-    chat_input = discord.ui.TextInput(label='ID do Canal/DM', style=discord.TextStyle.short, required=True)
+class ClearTokenModal(discord.ui.Modal, title='🗑️ Limpar Token'):
+    confirm = discord.ui.TextInput(label='Digite CONFIRMAR para remover o token', style=discord.TextStyle.short, required=True)
+    async def on_submit(self, interaction: discord.Interaction):
+        if self.confirm.value.strip().upper() != 'CONFIRMAR':
+            return await interaction.response.send_message('❌ Confirmação incorreta. Token não removido.', ephemeral=True)
+        user_id = interaction.user.id
+        data = get_user(user_id)
+        data['token'] = None
+        save_user_to_db(user_id)
+        stop_gateway(user_id)
+        stop_science(user_id)
+        await interaction.response.send_message('✅ Token removido com sucesso!', ephemeral=True)
+
+class SetChatModal(discord.ui.Modal, title='💬 Definir Canal (Limpeza/Backup)'):
+    chat_input = discord.ui.TextInput(label='ID do Canal', style=discord.TextStyle.short, required=True)
     async def on_submit(self, interaction: discord.Interaction):
         user_id = interaction.user.id
         try:
@@ -1059,27 +1087,41 @@ class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
 
         data['chat_id'] = chat_id
         save_user_to_db(user_id)
-        await interaction.response.send_message(f'✅ Chat alvo definido: `{chat_id}` (salvo no banco)', ephemeral=True)
+        await interaction.response.send_message(f'✅ Canal definido: `{chat_id}` (para Limpeza e Backup)', ephemeral=True)
 
-class ScheduleModal(discord.ui.Modal, title='⏰ Agendar Mensagem'):
-    msg_input = discord.ui.TextInput(label='Mensagem a ser enviada', style=discord.TextStyle.paragraph, required=True)
-    delay_input = discord.ui.TextInput(label='Daqui a quantos minutos?', style=discord.TextStyle.short, required=True)
-
+class SetFarmChatModal(discord.ui.Modal, title='💬 Definir Canal para Farm'):
+    chat_input = discord.ui.TextInput(label='ID do Canal', style=discord.TextStyle.short, required=True)
     async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
         try:
-            delay_min = float(self.delay_input.value.strip().replace(',', '.'))
+            chat_id = int(self.chat_input.value.strip())
         except ValueError:
-            return await interaction.response.send_message('❌ Tempo inválido.', ephemeral=True)
-        if delay_min < 1:
-            return await interaction.response.send_message('❌ O tempo mínimo é de 1 minuto.', ephemeral=True)
+            return await interaction.response.send_message('❌ ID inválido. Apenas números.', ephemeral=True)
 
-        data = get_user(interaction.user.id)
-        bot.loop.create_task(perform_schedule(data['token'], data['chat_id'], self.msg_input.value, delay_min * 60))
-        await interaction.response.send_message(f'✅ Mensagem agendada para daqui a {delay_min} minutos.', ephemeral=True)
+        data = get_user(user_id)
+        if not data.get('token'):
+            return await interaction.response.send_message('❌ Configure o token primeiro.', ephemeral=True)
 
-class FarmBumperModal(discord.ui.Modal, title='🔄 Configurar Auto-Farm'):
-    cmd_input = discord.ui.TextInput(label='Comando/Mensagem (Ex: !bump)', style=discord.TextStyle.short, required=True)
-    interval_input = discord.ui.TextInput(label='Minutos (Mín: 15)', style=discord.TextStyle.short, default='120', required=True)
+        headers = build_headers({"Authorization": data['token']})
+        resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{chat_id}', headers=headers)
+        if resp.status_code != 200:
+            return await interaction.response.send_message('❌ Canal não encontrado ou sem permissão.', ephemeral=True)
+
+        data['farm_chat_id'] = chat_id
+        save_user_to_db(user_id)
+        # Se mensagem já estiver definida, inicia farm
+        if data.get('farm_message'):
+            data['auto_farming'] = True
+            data['farm_cancel'] = asyncio.Event()
+            save_user_to_db(user_id)
+            bot.loop.create_task(perform_auto_farm(user_id, data['farm_message'], data['farm_interval']))
+            await interaction.response.send_message(f'✅ Canal de Farm definido: `{chat_id}`. Farm iniciado!', ephemeral=True)
+        else:
+            await interaction.response.send_message(f'✅ Canal de Farm definido: `{chat_id}`. Defina a mensagem para iniciar.', ephemeral=True)
+
+class ScheduleModal(discord.ui.Modal, title='⏰ Agendar Mensagem (Farm)'):
+    msg_input = discord.ui.TextInput(label='Mensagem a ser enviada', style=discord.TextStyle.paragraph, required=True)
+    interval_input = discord.ui.TextInput(label='Intervalo (minutos)', style=discord.TextStyle.short, default='120', required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
         user_id = interaction.user.id
@@ -1091,14 +1133,19 @@ class FarmBumperModal(discord.ui.Modal, title='🔄 Configurar Auto-Farm'):
             return await interaction.response.send_message('🛡️ **Anti-Ban:** Mínimo 15 minutos.', ephemeral=True)
 
         data = get_user(user_id)
-        data['auto_farming'] = True
+        data['farm_message'] = self.msg_input.value
         data['farm_interval'] = int(interval_min * 60)
-        data['farm_message'] = self.cmd_input.value
-        data['farm_cancel'] = asyncio.Event()
         save_user_to_db(user_id)
 
-        await interaction.response.send_message(f'✅ Auto-Farm configurado e iniciado (envio a cada {interval_min} min).', ephemeral=True)
-        bot.loop.create_task(perform_auto_farm(user_id, data['farm_message'], data['farm_interval']))
+        # Se canal de farm já estiver definido, inicia
+        if data.get('farm_chat_id'):
+            data['auto_farming'] = True
+            data['farm_cancel'] = asyncio.Event()
+            save_user_to_db(user_id)
+            bot.loop.create_task(perform_auto_farm(user_id, data['farm_message'], data['farm_interval']))
+            await interaction.response.send_message(f'✅ Mensagem definida. Farm iniciado a cada {interval_min} min.', ephemeral=True)
+        else:
+            await interaction.response.send_message(f'✅ Mensagem definida. Defina o canal de Farm para iniciar.', ephemeral=True)
 
 class CloneModal(discord.ui.Modal, title='🎭 Clonar Perfil'):
     target_input = discord.ui.TextInput(label='ID do Usuário Alvo', style=discord.TextStyle.short, required=True)
@@ -1112,7 +1159,7 @@ class CloneModal(discord.ui.Modal, title='🎭 Clonar Perfil'):
         msg = await interaction.followup.send('🔄 **Lendo dados do perfil...**')
         bot.loop.create_task(perform_clone(interaction.user.id, target_id, msg))
 
-class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
+class CallModal(discord.ui.Modal, title='🎧 Configurar Call'):
     channel_input = discord.ui.TextInput(label='ID do Canal de Voz', style=discord.TextStyle.short, required=True)
     hours_input = discord.ui.TextInput(label='Tempo (Horas)', style=discord.TextStyle.short, default='2', required=True)
     async def on_submit(self, interaction: discord.Interaction):
@@ -1127,21 +1174,21 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         data['call_cancel'] = asyncio.Event()
 
         await interaction.response.defer()
-        msg = await interaction.followup.send(f'🔄 **Negociando conexão com o Gateway...**')
+        msg = await interaction.followup.send(f'🔄 **Conectando à call...**')
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL ORGANIZADO POR CATEGORIAS (com rows corrigidos)
+# PAINEL (SELECT + BOTÕES)
 # ============================================================
 
 class CategorySelect(discord.ui.Select):
     def __init__(self, user_id):
         self.user_id = user_id
         options = [
-            discord.SelectOption(label="⚙️ Configuração", value="config", description="Token e Chat", emoji="🔑"),
+            discord.SelectOption(label="⚙️ Configuração", value="config", description="Token e status", emoji="🔑"),
             discord.SelectOption(label="🧹 Limpeza", value="clean", description="Apagar mensagens", emoji="🗑️"),
             discord.SelectOption(label="💾 Backup", value="backup", description="Salvar conversas", emoji="📁"),
-            discord.SelectOption(label="🔄 Farm", value="farm", description="Auto-Farm e Agendamento", emoji="⏰"),
+            discord.SelectOption(label="📅 Agendar Mensagem", value="farm", description="Auto-Farm", emoji="⏰"),
             discord.SelectOption(label="🎭 Perfil", value="profile", description="Clonar perfil", emoji="👤"),
             discord.SelectOption(label="🎧 Voz", value="voice", description="Call e presença", emoji="🔊"),
         ]
@@ -1158,33 +1205,31 @@ class CategoryView(discord.ui.View):
     def __init__(self, user_id, category):
         super().__init__(timeout=None)
         self.user_id = user_id
-        # Select na linha 0
         self.add_item(CategorySelect(user_id))
 
-        # Botões na linha 1
         if category == "config":
             self.add_item(ConfigButtonToken(user_id))
-            self.add_item(ConfigButtonChat(user_id))
+            self.add_item(ConfigButtonClearToken(user_id))
             self.add_item(ConfigButtonStatus(user_id))
         elif category == "clean":
+            self.add_item(CleanButtonSetChat(user_id))
             self.add_item(CleanButtonStart(user_id))
             self.add_item(CleanButtonStop(user_id))
         elif category == "backup":
             self.add_item(BackupButton(user_id))
         elif category == "farm":
-            self.add_item(FarmButtonSchedule(user_id))
-            self.add_item(FarmButtonConfig(user_id))
-            self.add_item(FarmButtonStop(user_id))
+            self.add_item(FarmButtonSetMessage(user_id))
+            self.add_item(FarmButtonSetChat(user_id))
         elif category == "profile":
             self.add_item(ProfileButtonClone(user_id))
         elif category == "voice":
             self.add_item(VoiceButtonCall(user_id))
             self.add_item(VoiceButtonStop(user_id))
 
-# ---------- BOTÕES (todos com row=1) ----------
+# ---------- BOTÕES CONFIGURAÇÃO ----------
 class ConfigButtonToken(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, row=1)
+        super().__init__(label="🔑 Configurar Token", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1192,15 +1237,15 @@ class ConfigButtonToken(discord.ui.Button):
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         await interaction.response.send_modal(TokenModal())
 
-class ConfigButtonChat(discord.ui.Button):
+class ConfigButtonClearToken(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="💬 Set Chat", style=discord.ButtonStyle.success, row=1)
+        super().__init__(label="🗑️ Limpar Token", style=discord.ButtonStyle.danger, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        await interaction.response.send_modal(ChatModal())
+        await interaction.response.send_modal(ClearTokenModal())
 
 class ConfigButtonStatus(discord.ui.Button):
     def __init__(self, user_id):
@@ -1214,11 +1259,24 @@ class ConfigButtonStatus(discord.ui.Button):
         await interaction.response.send_message(
             f"**Configurações atuais:**\n"
             f"Token: {'✅ configurado' if data['token'] else '❌ não definido'}\n"
-            f"Chat: {data['chat_id'] or '❌ não definido'}\n"
+            f"Canal Limpeza/Backup: {data['chat_id'] or '❌ não definido'}\n"
+            f"Canal Farm: {data['farm_chat_id'] or '❌ não definido'}\n"
+            f"Mensagem Farm: {data['farm_message'] or '❌ não definida'}\n"
             f"Auto-Farm: {'✅ ativo' if data['auto_farming'] else '❌ inativo'}\n"
             f"Modo sono: {'💤 ativo' if data['sleep_mode'] else '☀️ inativo'}",
             ephemeral=True
         )
+
+# ---------- BOTÕES LIMPEZA ----------
+class CleanButtonSetChat(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="💬 Definir Canal", style=discord.ButtonStyle.success, row=1)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        await interaction.response.send_modal(SetChatModal())
 
 class CleanButtonStart(discord.ui.Button):
     def __init__(self, user_id):
@@ -1230,7 +1288,7 @@ class CleanButtonStart(discord.ui.Button):
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if not data['token'] or not data['chat_id']:
-            return await interaction.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
+            return await interaction.response.send_message('❌ Configure Token e Canal primeiro.', ephemeral=True)
         if data['cleaning']:
             return await interaction.response.send_message('⏳ Já em execução.', ephemeral=True)
         if not await check_account_health(self.user_id):
@@ -1254,6 +1312,7 @@ class CleanButtonStop(discord.ui.Button):
             data['clean_cancel'].set()
         await interaction.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
 
+# ---------- BOTÃO BACKUP ----------
 class BackupButton(discord.ui.Button):
     def __init__(self, user_id):
         super().__init__(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=1)
@@ -1264,52 +1323,37 @@ class BackupButton(discord.ui.Button):
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if not data['token'] or not data['chat_id']:
-            return await interaction.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
+            return await interaction.response.send_message('❌ Configure Token e Canal primeiro.', ephemeral=True)
         if not await check_account_health(self.user_id):
             return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
         bot.loop.create_task(perform_backup(interaction, data['token'], data['chat_id']))
 
-class FarmButtonSchedule(discord.ui.Button):
+# ---------- BOTÕES FARM ----------
+class FarmButtonSetMessage(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=1)
+        super().__init__(label="📝 Definir Mensagem", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['chat_id']:
-            return await interaction.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
+        if not get_user(self.user_id)['token']:
+            return await interaction.response.send_message('❌ Configure o Token primeiro.', ephemeral=True)
         await interaction.response.send_modal(ScheduleModal())
 
-class FarmButtonConfig(discord.ui.Button):
+class FarmButtonSetChat(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=1)
+        super().__init__(label="💬 Definir Canal", style=discord.ButtonStyle.success, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        if not get_user(self.user_id)['chat_id']:
-            return await interaction.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
-        if not await check_account_health(self.user_id):
-            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
-        await interaction.response.send_modal(FarmBumperModal())
+        if not get_user(self.user_id)['token']:
+            return await interaction.response.send_message('❌ Configure o Token primeiro.', ephemeral=True)
+        await interaction.response.send_modal(SetFarmChatModal())
 
-class FarmButtonStop(discord.ui.Button):
-    def __init__(self, user_id):
-        super().__init__(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=1)
-        self.user_id = user_id
-
-    async def callback(self, interaction: discord.Interaction):
-        if interaction.user.id != self.user_id:
-            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        data = get_user(self.user_id)
-        data['auto_farming'] = False
-        update_user_field(self.user_id, 'auto_farming', False if DB_TYPE == 'postgres' else 0)
-        if data['farm_cancel']:
-            data['farm_cancel'].set()
-        await interaction.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
-
+# ---------- BOTÃO PERFIL ----------
 class ProfileButtonClone(discord.ui.Button):
     def __init__(self, user_id):
         super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=1)
@@ -1322,6 +1366,7 @@ class ProfileButtonClone(discord.ui.Button):
             return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
         await interaction.response.send_modal(CloneModal())
 
+# ---------- BOTÕES VOZ ----------
 class VoiceButtonCall(discord.ui.Button):
     def __init__(self, user_id):
         super().__init__(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=1)
@@ -1351,9 +1396,7 @@ class VoiceButtonStop(discord.ui.Button):
 # VERIFICAÇÃO DE CARGO
 # ============================================================
 async def check_user_role(interaction: discord.Interaction) -> bool:
-    """Verifica se o utilizador tem o cargo permitido. Se não tiver, envia mensagem de erro."""
     if interaction.guild is None:
-        # Comando executado em DM – não podemos verificar cargo
         await interaction.response.send_message(
             "❌ Este comando só pode ser usado num servidor com o cargo adequado.",
             ephemeral=True
@@ -1361,20 +1404,17 @@ async def check_user_role(interaction: discord.Interaction) -> bool:
         return False
 
     member = interaction.user
-    role_id = ALLOWED_ROLE_ID
-
-    # Verifica se o cargo existe na guild
-    role = interaction.guild.get_role(role_id)
+    role = interaction.guild.get_role(ALLOWED_ROLE_ID)
     if role is None:
         await interaction.response.send_message(
-            "❌ O cargo de permissão não existe neste servidor. Contacte o administrador.",
+            "❌ O cargo de permissão não existe neste servidor.",
             ephemeral=True
         )
         return False
 
     if role not in member.roles:
         await interaction.response.send_message(
-            f"❌ Você não tem o cargo <@&{role_id}> necessário para usar este painel.",
+            f"❌ Você não tem o cargo <@&{ALLOWED_ROLE_ID}> necessário.",
             ephemeral=True
         )
         return False
@@ -1386,22 +1426,21 @@ async def check_user_role(interaction: discord.Interaction) -> bool:
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
-    # Verifica permissão de cargo antes de qualquer coisa
     if not await check_user_role(interaction):
         return
 
     await warmup()
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
-        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados.',
+        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente.',
         color=discord.Color.brand_green()
     )
-    embed.add_field(name='⚙️ Configuração', value='Token e Chat alvo', inline=True)
+    embed.add_field(name='⚙️ Configuração', value='Token', inline=True)
     embed.add_field(name='🧹 Limpeza', value=f'Cota: {MAX_MESSAGES} msgs', inline=True)
     embed.add_field(name='💾 Backup', value=f'Limite: {MAX_BACKUP} msgs', inline=True)
-    embed.add_field(name='🔄 Farm', value='Auto-Farm e Agendamento', inline=True)
+    embed.add_field(name='📅 Agendar Mensagem', value='Auto-Farm', inline=True)
     embed.add_field(name='🎭 Perfil', value='Clonar perfil', inline=True)
-    embed.add_field(name='🎧 Voz', value='Call e presença', inline=True)
+    embed.add_field(name='🎧 Voz', value='Call', inline=True)
     embed.set_footer(text='Todas as ações simulam comportamento humano com segurança máxima.')
     view = CategoryView(interaction.user.id, "config")
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
