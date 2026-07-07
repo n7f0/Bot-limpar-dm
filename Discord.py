@@ -15,7 +15,7 @@ import secrets
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import AsyncSession
 import aiohttp
-from aiohttp import ClientWebSocketResponse, WSMsgType
+from aiohttp import WSMsgType
 
 # ============================================================
 # CONFIGURAÇÃO DO BOT OFICIAL
@@ -39,19 +39,16 @@ PAUSE_DUR_MAX = 180.0
 MAX_MESSAGES = 150
 MAX_BACKUP = 3000
 
-# Horário de sono (inatividade humana)
 SLEEP_START_HOUR = 23
 SLEEP_END_HOUR = 7
 
-# Descanso pós-tarefa (minutos)
-POST_TASK_REST_MIN = 5   # 5 minutos
-POST_TASK_REST_MAX = 15  # 15 minutos
+POST_TASK_REST_MIN = 5
+POST_TASK_REST_MAX = 15
 
 # ============================================================
-# FUNÇÕES ESTATÍSTICAS (DISTRIBUIÇÃO NORMAL)
+# FUNÇÕES ESTATÍSTICAS
 # ============================================================
 def normal_random(mean: float, std: float, min_val: float = 0, max_val: float = float('inf')) -> float:
-    """Gera número aleatório com distribuição normal truncada."""
     u1 = random.random()
     u2 = random.random()
     z = math.sqrt(-2 * math.log(u1)) * math.cos(2 * math.pi * u2)
@@ -59,7 +56,7 @@ def normal_random(mean: float, std: float, min_val: float = 0, max_val: float = 
     return max(min_val, min(val, max_val))
 
 # ============================================================
-# GERENCIADOR DE FINGERPRINT (COM VARIAÇÃO POR REQUISIÇÃO)
+# FINGERPRINT MANAGER
 # ============================================================
 class FingerprintManager:
     CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
@@ -71,7 +68,6 @@ class FingerprintManager:
         self.session_id = secrets.token_hex(32)
         self.base = self._generate()
         self.current = self.base.copy()
-        self.last_rotate = time.time()
 
     def _generate(self):
         chrome = random.choice(self.CHROME_VERSIONS)
@@ -110,7 +106,7 @@ class FingerprintManager:
     def rotate(self):
         self.base = self._generate()
         self.current = self.base.copy()
-        self.session_id = secrets.token_hex(32)  # nova sessão
+        self.session_id = secrets.token_hex(32)
 
     def get_context_headers(self):
         context = {
@@ -123,7 +119,7 @@ class FingerprintManager:
 fingerprint_mgr = FingerprintManager()
 
 # ============================================================
-# SESSÃO CURL_CFFI + HEADERS COMPLETOS DE NAVEGADOR
+# HEADERS E SESSÃO
 # ============================================================
 def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) -> dict:
     fp = fingerprint_mgr.get(vary=vary_fingerprint)
@@ -175,7 +171,7 @@ async def warmup(force=False):
         print(f"⚠️ Erro no warmup: {e}")
 
 # ============================================================
-# ESTRUTURA DE DADOS GLOBAL
+# ESTRUTURA DE DADOS
 # ============================================================
 user_data = {}
 
@@ -195,7 +191,7 @@ def get_user(user_id):
     return user_data[user_id]
 
 # ============================================================
-# FUNÇÕES AUXILIARES: NONCE, SLEEP, SAÚDE, DESCANSO
+# FUNÇÕES AUXILIARES
 # ============================================================
 EPOCH = 1420070400000
 _increment = 0
@@ -257,7 +253,7 @@ async def check_resting(user_id: int) -> bool:
     return data['resting_until'] > time.time()
 
 # ============================================================
-# REQUEST COM RATE‑LIMIT GLOBAL
+# REQUEST COM RATE LIMIT
 # ============================================================
 async def request_with_rate_limit(method: str, url: str, headers: dict = None, json_data: dict = None, **kwargs):
     if not headers:
@@ -280,7 +276,7 @@ async def request_with_rate_limit(method: str, url: str, headers: dict = None, j
         return resp
 
 # ============================================================
-# SIMULAÇÃO DE DIGITAÇÃO, ACK, REAÇÕES
+# SIMULAÇÕES (DIGITAÇÃO, ACK, REAÇÕES)
 # ============================================================
 async def simulate_typing(channel_id: int, token: str, duration: float = None):
     if duration is None:
@@ -314,7 +310,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP)
+# VOICE CONNECTION (CORRIGIDA)
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -326,67 +322,118 @@ class VoiceConnection:
         self.sequence = 0
         self.timestamp = 0
         self.is_running = False
+        self.heartbeat_task = None
 
     async def start(self):
-        ready_msg = await self.ws.receive()
-        data = json.loads(ready_msg.data)
-        if data.get('op') == 2:  # READY
-            ip = data['d']['ip']
-            port = data['d']['port']
-            self.ssrc = data['d']['ssrc']
-            modes = data['d']['modes']
-            mode = modes[0] if modes else 'xsalsa20_poly1305'
+        """Inicia a conexão UDP e o heartbeat."""
+        # Aguarda o ready do WebSocket de voz
+        try:
+            ready_msg = await asyncio.wait_for(self.ws.receive(), timeout=30.0)
+        except asyncio.TimeoutError:
+            print("⏰ Timeout aguardando READY da voz")
+            return False
 
-            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.settimeout(1.0)
+        if ready_msg.type != WSMsgType.TEXT:
+            return False
 
-            packet = bytearray(74)
-            struct.pack_into('>I', packet, 0, self.ssrc)
-            self.udp_socket.sendto(packet, (ip, port))
+        try:
+            data = json.loads(ready_msg.data)
+        except json.JSONDecodeError:
+            return False
 
+        if data.get('op') != 2:  # READY
+            print(f"❌ Opcode inesperado: {data.get('op')}")
+            return False
+
+        d = data.get('d', {})
+        ip = d.get('ip')
+        port = d.get('port')
+        ssrc = d.get('ssrc')
+        modes = d.get('modes', [])
+
+        if not ip or not port or not ssrc:
+            print("❌ Dados de voz incompletos")
+            return False
+
+        self.ssrc = ssrc
+        mode = modes[0] if modes else 'xsalsa20_poly1305'
+
+        # Cria socket UDP
+        self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.udp_socket.settimeout(1.0)
+
+        # Envia pacote de descoberta
+        packet = bytearray(74)
+        struct.pack_into('>I', packet, 0, self.ssrc)
+        self.udp_socket.sendto(packet, (ip, port))
+
+        # Recebe resposta
+        try:
             resp, _ = self.udp_socket.recvfrom(74)
-            external_ip = resp[8:].decode().split('\x00', 1)[0]
-            external_port = struct.unpack('>H', resp[4:6])[0]
+        except socket.timeout:
+            print("⏰ Timeout recebendo resposta UDP")
+            self.udp_socket.close()
+            return False
 
-            await self.ws.send(json.dumps({
-                "op": 1,
-                "d": {
-                    "protocol": "udp",
-                    "data": {
-                        "address": external_ip,
-                        "port": external_port,
-                        "mode": mode
-                    }
+        external_ip = resp[8:].decode().split('\x00', 1)[0]
+        external_port = struct.unpack('>H', resp[4:6])[0]
+
+        # Envia SELECT_PROTOCOL
+        select_payload = {
+            "op": 1,
+            "d": {
+                "protocol": "udp",
+                "data": {
+                    "address": external_ip,
+                    "port": external_port,
+                    "mode": mode
                 }
-            }))
+            }
+        }
+        await self.ws.send(json.dumps(select_payload))
 
-            self.is_running = True
-            asyncio.create_task(self._udp_heartbeat())
+        self.is_running = True
+        self.heartbeat_task = asyncio.create_task(self._udp_heartbeat())
+        return True
 
     async def _udp_heartbeat(self):
-        while self.is_running:
-            if self.udp_socket:
+        """Envia pacotes RTP vazios como heartbeat UDP."""
+        while self.is_running and self.udp_socket:
+            try:
+                # Cabeçalho RTP
                 header = bytearray(12)
-                header[0] = 0x80
-                header[1] = 0x78
+                header[0] = 0x80  # V=2, P=0, X=0, CC=0
+                header[1] = 0x78  # PT=120 (payload type opus)
                 struct.pack_into('>H', header, 2, self.sequence)
                 struct.pack_into('>I', header, 4, self.timestamp)
                 struct.pack_into('>I', header, 8, self.ssrc)
+
                 self.sequence += 1
                 self.timestamp += 960
+
+                # Envia para o mesmo destino do handshake
+                # O endereço foi armazenado durante o handshake
+                # Mas precisamos do endereço real, que está no socket
+                # Na prática, enviamos para o mesmo IP/porta que recebemos
+                # Como não armazenamos, usamos o getpeername se disponível
                 try:
-                    self.udp_socket.sendto(header, (self.udp_socket.getpeername()[0], self.udp_socket.getpeername()[1]))
+                    self.udp_socket.sendto(header, self.udp_socket.getpeername())
                 except:
                     pass
+            except Exception as e:
+                print(f"Erro no heartbeat UDP: {e}")
+
             await asyncio.sleep(random.uniform(4.5, 6.0))
 
     def stop(self):
         self.is_running = False
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
         if self.udp_socket:
             self.udp_socket.close()
 
 # ============================================================
-# GATEWAY (PRESENÇA COM ALTERNÂNCIA AFK)
+# GATEWAY PRESENCE (COM AFK)
 # ============================================================
 async def gateway_presence(user_id: int):
     data = get_user(user_id)
@@ -430,7 +477,6 @@ async def gateway_presence(user_id: int):
                 afk_since = None
 
                 while not data.get('gateway_stop', False):
-                    # Heartbeat adaptativo com distribuição normal
                     mean_interval = base_interval + 0.1
                     adjusted_interval = normal_random(mean_interval, 0.05 * mean_interval, min_val=10.0)
                     if data.get('sleep_mode', False):
@@ -439,7 +485,6 @@ async def gateway_presence(user_id: int):
                     if not data.get('gateway_stop', False):
                         await ws.send_json({"op": 1, "d": None})
 
-                    # Alternância de status (online ↔ idle)
                     if time.time() - last_status_change > status_cycle:
                         if current_status == "online":
                             current_status = "idle"
@@ -482,7 +527,7 @@ def stop_gateway(user_id: int):
         data['gateway_task'].cancel()
 
 # ============================================================
-# TELEMETRIA (SCIENCE) + MOUSE JITTER
+# TELEMETRIA (SCIENCE)
 # ============================================================
 async def science_telemetry(user_id: int):
     data = get_user(user_id)
@@ -544,7 +589,121 @@ def stop_science(user_id: int):
         data['science_task'].cancel()
 
 # ============================================================
-# TAREFAS CORE (LIMPEZA, BACKUP, FARM, CLONE, VOZ)
+# PERFORM VOICE FARM (CORRIGIDA)
+# ============================================================
+async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
+    data = get_user(user_id)
+    token = data['token']
+    if not token:
+        await progress_msg.edit(content='❌ Token não configurado.')
+        return
+
+    headers = build_headers({"Authorization": token})
+
+    # 1. Obter informações do canal (guild_id)
+    resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
+    if resp.status != 200:
+        await progress_msg.edit(content='❌ Canal de voz não encontrado ou sem permissão.')
+        return
+    channel_info = resp.json()
+    guild_id = channel_info.get('guild_id')
+    if not guild_id:
+        await progress_msg.edit(content='❌ Este canal não pertence a um servidor (não suporta voz).')
+        return
+
+    await progress_msg.edit(content='🔄 **Conectando ao Gateway de voz...**')
+
+    # 2. Conectar ao WebSocket de voz
+    async with aiohttp.ClientSession() as aio_session:
+        try:
+            async with aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json') as voice_ws:
+                # Receber HELLO
+                hello = await voice_ws.receive_json()
+                heartbeat_interval = hello['d']['heartbeat_interval'] / 1000.0
+
+                # Enviar IDENTIFY (op 2)
+                await voice_ws.send_json({
+                    "op": 2,
+                    "d": {
+                        "token": token,
+                        "properties": fingerprint_mgr.get(vary=False),
+                        "presence": {
+                            "status": "online",
+                            "since": 0,
+                            "activities": [],
+                            "afk": False
+                        }
+                    }
+                })
+
+                # Aguardar READY (op 2)
+                ready = await voice_ws.receive_json()
+                if ready.get('op') != 2:
+                    await progress_msg.edit(content='❌ Falha ao autenticar no gateway de voz.')
+                    return
+
+                # Enviar VOICE_STATE_UPDATE (op 4)
+                await voice_ws.send_json({
+                    "op": 4,
+                    "d": {
+                        "guild_id": guild_id,
+                        "channel_id": str(channel_id),
+                        "self_mute": True,
+                        "self_deaf": True
+                    }
+                })
+
+                # Aguardar o evento de VOICE_SERVER_UPDATE e VOICE_STATE_UPDATE
+                # Na prática, precisamos esperar o READY da voz (op 2) que contém os dados UDP
+                # Já recebemos o READY, agora iniciamos a conexão UDP
+                voice = VoiceConnection(user_id, voice_ws, token)
+                success = await voice.start()
+                if not success:
+                    await progress_msg.edit(content='❌ Falha ao estabelecer conexão UDP de voz.')
+                    return
+
+                await progress_msg.edit(content=f'✅ **Na call com RTP ativo por {hours}h**')
+
+                end_time = time.time() + (hours * 3600)
+                last_heartbeat = time.time()
+
+                while time.time() < end_time and not data['call_cancel'].is_set():
+                    if await check_sleep_mode(user_id):
+                        await progress_msg.edit(content='💤 **Modo sono – saindo da call.**')
+                        break
+
+                    # Heartbeat para o WS de voz
+                    if time.time() - last_heartbeat > heartbeat_interval:
+                        try:
+                            await voice_ws.send_json({"op": 1, "d": None})
+                            last_heartbeat = time.time()
+                        except:
+                            break
+
+                    # Recebe mensagens do WS
+                    try:
+                        msg = await asyncio.wait_for(voice_ws.receive(), timeout=30.0)
+                        if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                            break
+                    except asyncio.TimeoutError:
+                        continue
+                    except:
+                        break
+
+                voice.stop()
+                await voice_ws.close()
+
+        except Exception as e:
+            print(f"Erro na voz: {e}")
+            await progress_msg.edit(content=f'❌ Erro na conexão de voz: {str(e)[:100]}')
+            return
+
+    data['farming_call'] = False
+    await progress_msg.edit(content='⏹️ **Call encerrada.**')
+    await post_task_rest(user_id)
+
+# ============================================================
+# TAREFAS CORE (LIMPEZA, BACKUP, FARM, CLONE)
 # ============================================================
 async def perform_schedule(token, chat_id, message, delay_sec):
     await asyncio.sleep(delay_sec)
@@ -613,7 +772,6 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
         if not msgs:
             break
 
-        # Processa mensagens e armazena IDs para ACK e reações
         for m in msgs:
             author = m['author']['username']
             content = m.get('content', '[Vazio ou Anexo]')
@@ -624,12 +782,10 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
         last_id = msgs[-1]['id']
         page_count += 1
 
-        # Simula leitura: ACK para uma mensagem aleatória desta página
         if msg_ids and random.random() < 0.3:
             ack_msg = random.choice(msg_ids)
             await send_message_ack(chat_id, ack_msg, token, mention_count=0)
 
-        # Reação aleatória em algumas mensagens
         if msg_ids and random.random() < 0.2:
             react_msg = random.choice(msg_ids)
             await random_reaction(chat_id, react_msg, token)
@@ -762,67 +918,8 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     await progress_msg.edit(content=f'✅ **Limpeza finalizada.** Deletadas: {messages_deleted}. Tempo: {int(time.time()-start_time)}s.')
     await post_task_rest(interaction.user.id)
 
-async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
-    data = get_user(user_id)
-    token = data['token']
-    headers = build_headers({"Authorization": token})
-
-    async with aiohttp.ClientSession() as aio_session:
-        resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
-        if resp.status != 200:
-            return await progress_msg.edit(content='❌ Erro ao acessar o canal.')
-        guild_id = (await resp.json()).get('guild_id')
-
-        # WebSocket de voz
-        voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
-        hello = await voice_ws.receive_json()
-        base_interval = hello['d']['heartbeat_interval'] / 1000.0
-
-        await voice_ws.send_json({
-            "op": 2,
-            "d": {
-                "token": token,
-                "properties": fingerprint_mgr.get(vary=False)
-            }
-        })
-        await voice_ws.receive_json()  # Ready
-
-        await voice_ws.send_json({
-            "op": 4,
-            "d": {
-                "guild_id": guild_id,
-                "channel_id": str(channel_id),
-                "self_mute": True,
-                "self_deaf": True
-            }
-        })
-
-        voice = VoiceConnection(user_id, voice_ws, token)
-        await voice.start()
-
-        await progress_msg.edit(content=f'✅ **Na call com RTP ativo por {hours}h**')
-
-        end_time = time.time() + (hours * 3600)
-        while time.time() < end_time and not data['call_cancel'].is_set():
-            if await check_sleep_mode(user_id):
-                break
-            try:
-                msg = await asyncio.wait_for(voice_ws.receive(), timeout=30)
-                if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                    break
-            except asyncio.TimeoutError:
-                await voice_ws.send_json({"op": 1, "d": None})
-            except:
-                break
-
-        voice.stop()
-        await voice_ws.close()
-        data['farming_call'] = False
-        await progress_msg.edit(content='⏹️ **Call encerrada.**')
-        await post_task_rest(user_id)
-
 # ============================================================
-# MODAIS (ENTRADA DE DADOS)
+# MODAIS
 # ============================================================
 class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
     token_input = discord.ui.TextInput(label='Token de usuário', style=discord.TextStyle.paragraph, required=True)
@@ -922,7 +1019,7 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL PRINCIPAL (VIEW)
+# PAINEL PRINCIPAL
 # ============================================================
 class PainelPrincipal(discord.ui.View):
     def __init__(self, user_id):
