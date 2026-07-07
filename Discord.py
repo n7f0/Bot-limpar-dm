@@ -12,6 +12,7 @@ import math
 import socket
 import struct
 import secrets
+import sqlite3
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import AsyncSession
 import aiohttp
@@ -29,7 +30,7 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
-# CONFIGURAÇÕES DE SEGURANÇA AVANÇADAS
+# CONFIGURAÇÕES DE SEGURANÇA
 # ============================================================
 MIN_DELAY = 15.0
 MAX_DELAY = 35.0
@@ -38,12 +39,77 @@ PAUSE_DUR_MIN = 120.0
 PAUSE_DUR_MAX = 180.0
 MAX_MESSAGES = 150
 MAX_BACKUP = 3000
-
 SLEEP_START_HOUR = 23
 SLEEP_END_HOUR = 7
-
-POST_TASK_REST_MIN = 5   # minutos
+POST_TASK_REST_MIN = 5
 POST_TASK_REST_MAX = 15
+
+# ============================================================
+# BANCO DE DADOS SQLITE
+# ============================================================
+DB_PATH = "config.db"
+
+def init_db():
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_config (
+            user_id INTEGER PRIMARY KEY,
+            token TEXT,
+            chat_id INTEGER,
+            auto_farming INTEGER DEFAULT 0,
+            farm_interval INTEGER DEFAULT 120,
+            farm_message TEXT,
+            sleep_mode INTEGER DEFAULT 0
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+def load_user_config(user_id):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
+    row = c.fetchone()
+    conn.close()
+    if row:
+        return {
+            'token': row[0],
+            'chat_id': row[1],
+            'auto_farming': bool(row[2]),
+            'farm_interval': row[3],
+            'farm_message': row[4],
+            'sleep_mode': bool(row[5])
+        }
+    return None
+
+def save_user_config(user_id, data):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO user_config
+        (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        user_id,
+        data.get('token'),
+        data.get('chat_id'),
+        1 if data.get('auto_farming') else 0,
+        data.get('farm_interval', 120),
+        data.get('farm_message', ''),
+        1 if data.get('sleep_mode') else 0
+    ))
+    conn.commit()
+    conn.close()
+
+def update_user_field(user_id, field, value):
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute(f'UPDATE user_config SET {field} = ? WHERE user_id = ?', (value, user_id))
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # ============================================================
 # FUNÇÕES ESTATÍSTICAS
@@ -172,24 +238,70 @@ async def warmup(force=False):
         print(f"⚠️ Erro no warmup: {e}")
 
 # ============================================================
-# ESTRUTURA DE DADOS GLOBAL
+# ESTRUTURA DE DADOS EM MEMÓRIA (SINCRONIZADA COM BD)
 # ============================================================
 user_data = {}
 
 def get_user(user_id):
     if user_id not in user_data:
-        user_data[user_id] = {
-            'token': None, 'chat_id': None, 'cleaning': False,
-            'clean_cancel': None, 'farming_call': False,
-            'call_cancel': None, 'auto_farming': False, 'farm_cancel': None,
-            'gateway_task': None, 'science_task': None,
-            'gateway_ws': None, 'gateway_stop': False,
-            'science_stop': False, 'sleep_mode': False,
-            'last_activity': time.time(),
-            'account_healthy': True,
-            'resting_until': 0,
-        }
+        # Carrega do banco
+        config = load_user_config(user_id)
+        if config:
+            user_data[user_id] = {
+                'token': config['token'],
+                'chat_id': config['chat_id'],
+                'cleaning': False,
+                'clean_cancel': None,
+                'farming_call': False,
+                'call_cancel': None,
+                'auto_farming': config['auto_farming'],
+                'farm_cancel': None,
+                'farm_interval': config['farm_interval'],
+                'farm_message': config['farm_message'],
+                'gateway_task': None,
+                'science_task': None,
+                'gateway_ws': None,
+                'gateway_stop': False,
+                'science_stop': False,
+                'sleep_mode': config['sleep_mode'],
+                'last_activity': time.time(),
+                'account_healthy': True,
+                'resting_until': 0,
+            }
+        else:
+            user_data[user_id] = {
+                'token': None,
+                'chat_id': None,
+                'cleaning': False,
+                'clean_cancel': None,
+                'farming_call': False,
+                'call_cancel': None,
+                'auto_farming': False,
+                'farm_cancel': None,
+                'farm_interval': 120,
+                'farm_message': '',
+                'gateway_task': None,
+                'science_task': None,
+                'gateway_ws': None,
+                'gateway_stop': False,
+                'science_stop': False,
+                'sleep_mode': False,
+                'last_activity': time.time(),
+                'account_healthy': True,
+                'resting_until': 0,
+            }
     return user_data[user_id]
+
+def save_user_to_db(user_id):
+    data = get_user(user_id)
+    save_user_config(user_id, {
+        'token': data['token'],
+        'chat_id': data['chat_id'],
+        'auto_farming': data['auto_farming'],
+        'farm_interval': data['farm_interval'],
+        'farm_message': data['farm_message'],
+        'sleep_mode': data['sleep_mode']
+    })
 
 # ============================================================
 # AUXILIARES
@@ -215,11 +327,13 @@ async def check_sleep_mode(user_id: int) -> bool:
     if is_sleep_time():
         if not data.get('sleep_mode'):
             data['sleep_mode'] = True
+            update_user_field(user_id, 'sleep_mode', 1)
             print(f"💤 Modo sono ativado para {user_id}")
         return True
     else:
         if data.get('sleep_mode'):
             data['sleep_mode'] = False
+            update_user_field(user_id, 'sleep_mode', 0)
             print(f"☀️ Modo sono desativado para {user_id}")
         return False
 
@@ -231,16 +345,13 @@ async def check_account_health(user_id: int) -> bool:
     headers = build_headers({"Authorization": token})
     try:
         resp = await session.get("https://discord.com/api/v10/users/@me", headers=headers)
-        print(f"🔍 Health check status: {resp.status_code}")  # Debug
         if resp.status_code == 200:
             data['account_healthy'] = True
             return True
         else:
             data['account_healthy'] = False
-            print(f"⚠️ Health check falhou com status {resp.status_code}")
             return False
-    except Exception as e:
-        print(f"⚠️ Exceção no health check: {e}")
+    except:
         data['account_healthy'] = False
         return False
 
@@ -257,14 +368,13 @@ async def check_resting(user_id: int) -> bool:
     return data['resting_until'] > time.time()
 
 # ============================================================
-# REQUEST COM RATE‑LIMIT (CORRIGIDA)
+# REQUEST COM RATE‑LIMIT
 # ============================================================
 async def request_with_rate_limit(method: str, url: str, headers: dict = None, json_data: dict = None, **kwargs):
     if not headers:
         headers = build_headers()
     resp = await session.request(method, url, headers=headers, json=json_data, **kwargs)
 
-    # Agora usamos status_code
     if resp.status_code == 429:
         retry_after = float(resp.headers.get('Retry-After', 5))
         global_limit = resp.headers.get('X-RateLimit-Global')
@@ -274,7 +384,6 @@ async def request_with_rate_limit(method: str, url: str, headers: dict = None, j
             await asyncio.sleep(retry_after + random.uniform(0.5, 1.5))
         return await request_with_rate_limit(method, url, headers, json_data, **kwargs)
 
-    # Atualiza rate limit se houver
     remaining = resp.headers.get('X-RateLimit-Remaining')
     if remaining is not None and int(remaining) < 5:
         await asyncio.sleep(random.uniform(1.0, 3.0))
@@ -282,7 +391,7 @@ async def request_with_rate_limit(method: str, url: str, headers: dict = None, j
     return resp
 
 # ============================================================
-# SIMULAÇÕES (DIGITAÇÃO, ACK, REAÇÕES)
+# SIMULAÇÕES
 # ============================================================
 async def simulate_typing(channel_id: int, token: str, duration: float = None):
     if duration is None:
@@ -332,7 +441,7 @@ class VoiceConnection:
     async def start(self):
         ready_msg = await self.ws.receive()
         data = json.loads(ready_msg.data)
-        if data.get('op') == 2:  # READY
+        if data.get('op') == 2:
             ip = data['d']['ip']
             port = data['d']['port']
             self.ssrc = data['d']['ssrc']
@@ -482,7 +591,7 @@ def stop_gateway(user_id: int):
         data['gateway_task'].cancel()
 
 # ============================================================
-# TELEMETRIA (SCIENCE) + MOUSE JITTER
+# TELEMETRIA (SCIENCE)
 # ============================================================
 async def science_telemetry(user_id: int):
     data = get_user(user_id)
@@ -544,7 +653,7 @@ def stop_science(user_id: int):
         data['science_task'].cancel()
 
 # ============================================================
-# TAREFAS CORE (LIMPEZA, BACKUP, FARM, CLONE, VOZ)
+# TAREFAS CORE
 # ============================================================
 async def perform_schedule(token, chat_id, message, delay_sec):
     await asyncio.sleep(delay_sec)
@@ -773,7 +882,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
         if not guild_id:
             return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
-        # WebSocket de voz
         voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
         hello = await voice_ws.receive_json()
         base_interval = hello['d']['heartbeat_interval'] / 1000.0
@@ -785,7 +893,7 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
                 "properties": fingerprint_mgr.get(vary=False)
             }
         })
-        await voice_ws.receive_json()  # Ready
+        await voice_ws.receive_json()
 
         await voice_ws.send_json({
             "op": 4,
@@ -822,29 +930,33 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
         await post_task_rest(user_id)
 
 # ============================================================
-# MODAIS (ENTRADA DE DADOS)
+# MODAIS
 # ============================================================
 class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
     token_input = discord.ui.TextInput(label='Token de usuário', style=discord.TextStyle.paragraph, required=True)
     async def on_submit(self, interaction: discord.Interaction):
-        get_user(interaction.user.id)['token'] = self.token_input.value.strip()
-        await interaction.response.send_message('✅ Token configurado com sucesso!', ephemeral=True)
+        user_id = interaction.user.id
+        data = get_user(user_id)
+        data['token'] = self.token_input.value.strip()
+        save_user_to_db(user_id)
+        await interaction.response.send_message('✅ Token configurado e salvo no banco!', ephemeral=True)
         await warmup()
-        start_gateway(interaction.user.id)
-        start_science(interaction.user.id)
-        healthy = await check_account_health(interaction.user.id)
+        start_gateway(user_id)
+        start_science(user_id)
+        healthy = await check_account_health(user_id)
         if not healthy:
             await interaction.followup.send('⚠️ Token parece inválido ou conta restrita. Verifique se é um token de usuário (não de bot).', ephemeral=True)
 
 class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
     chat_input = discord.ui.TextInput(label='ID do Canal/DM', style=discord.TextStyle.short, required=True)
     async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
         try:
             chat_id = int(self.chat_input.value.strip())
         except ValueError:
             return await interaction.response.send_message('❌ ID inválido. Apenas números.', ephemeral=True)
 
-        data = get_user(interaction.user.id)
+        data = get_user(user_id)
         if not data.get('token'):
             return await interaction.response.send_message('❌ Configure o token primeiro.', ephemeral=True)
 
@@ -854,7 +966,8 @@ class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
             return await interaction.response.send_message('❌ Canal não encontrado ou sem permissão.', ephemeral=True)
 
         data['chat_id'] = chat_id
-        await interaction.response.send_message(f'✅ Chat alvo definido: `{chat_id}`', ephemeral=True)
+        save_user_to_db(user_id)
+        await interaction.response.send_message(f'✅ Chat alvo definido: `{chat_id}` (salvo no banco)', ephemeral=True)
 
 class ScheduleModal(discord.ui.Modal, title='⏰ Agendar Mensagem'):
     msg_input = discord.ui.TextInput(label='Mensagem a ser enviada', style=discord.TextStyle.paragraph, required=True)
@@ -872,24 +985,28 @@ class ScheduleModal(discord.ui.Modal, title='⏰ Agendar Mensagem'):
         bot.loop.create_task(perform_schedule(data['token'], data['chat_id'], self.msg_input.value, delay_min * 60))
         await interaction.response.send_message(f'✅ Mensagem agendada para daqui a {delay_min} minutos.', ephemeral=True)
 
-class FarmBumperModal(discord.ui.Modal, title='🔄 Auto-Farm (Seguro)'):
+class FarmBumperModal(discord.ui.Modal, title='🔄 Configurar Auto-Farm'):
     cmd_input = discord.ui.TextInput(label='Comando/Mensagem (Ex: !bump)', style=discord.TextStyle.short, required=True)
     interval_input = discord.ui.TextInput(label='Minutos (Mín: 15)', style=discord.TextStyle.short, default='120', required=True)
 
     async def on_submit(self, interaction: discord.Interaction):
+        user_id = interaction.user.id
         try:
             interval_min = float(self.interval_input.value.strip().replace(',', '.'))
         except ValueError:
             return await interaction.response.send_message('❌ Intervalo inválido.', ephemeral=True)
         if interval_min < 15:
-            return await interaction.response.send_message('🛡️ **Anti-Ban:** Para sua segurança, o intervalo mínimo permitido é de 15 minutos.', ephemeral=True)
+            return await interaction.response.send_message('🛡️ **Anti-Ban:** Mínimo 15 minutos.', ephemeral=True)
 
-        data = get_user(interaction.user.id)
+        data = get_user(user_id)
         data['auto_farming'] = True
+        data['farm_interval'] = int(interval_min * 60)
+        data['farm_message'] = self.cmd_input.value
         data['farm_cancel'] = asyncio.Event()
+        save_user_to_db(user_id)
 
-        await interaction.response.send_message(f'✅ Auto-Farm furtivo iniciado. Envio a cada {interval_min} min.', ephemeral=True)
-        bot.loop.create_task(perform_auto_farm(interaction.user.id, self.cmd_input.value, interval_min * 60))
+        await interaction.response.send_message(f'✅ Auto-Farm configurado e iniciado (envio a cada {interval_min} min).', ephemeral=True)
+        bot.loop.create_task(perform_auto_farm(user_id, data['farm_message'], data['farm_interval']))
 
 class CloneModal(discord.ui.Modal, title='🎭 Clonar Perfil'):
     target_input = discord.ui.TextInput(label='ID do Usuário Alvo', style=discord.TextStyle.short, required=True)
@@ -900,7 +1017,7 @@ class CloneModal(discord.ui.Modal, title='🎭 Clonar Perfil'):
             return await interaction.response.send_message('❌ ID inválido.', ephemeral=True)
 
         await interaction.response.defer(ephemeral=False)
-        msg = await interaction.followup.send('🔄 **Lendo dados do perfil com segurança...**')
+        msg = await interaction.followup.send('🔄 **Lendo dados do perfil...**')
         bot.loop.create_task(perform_clone(interaction.user.id, target_id, msg))
 
 class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
@@ -922,47 +1039,87 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL PRINCIPAL (VIEW)
+# PAINEL ORGANIZADO POR CATEGORIAS (COM SELECT MENU)
 # ============================================================
-class PainelPrincipal(discord.ui.View):
+class CategorySelect(discord.ui.Select):
+    def __init__(self, user_id):
+        self.user_id = user_id
+        options = [
+            discord.SelectOption(label="⚙️ Configuração", value="config", description="Token e Chat", emoji="🔑"),
+            discord.SelectOption(label="🧹 Limpeza", value="clean", description="Apagar mensagens", emoji="🗑️"),
+            discord.SelectOption(label="💾 Backup", value="backup", description="Salvar conversas", emoji="📁"),
+            discord.SelectOption(label="🔄 Farm", value="farm", description="Auto-Farm e Agendamento", emoji="⏰"),
+            discord.SelectOption(label="🎭 Perfil", value="profile", description="Clonar perfil", emoji="👤"),
+            discord.SelectOption(label="🎧 Voz", value="voice", description="Call e presença", emoji="🔊"),
+        ]
+        super().__init__(placeholder="📂 Escolha uma categoria...", options=options, custom_id="category_select")
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        category = self.values[0]
+        view = CategoryView(self.user_id, category)
+        await interaction.response.edit_message(view=view)
+
+class CategoryView(discord.ui.View):
+    def __init__(self, user_id, category):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+        self.add_item(CategorySelect(user_id))
+
+        if category == "config":
+            self.add_item(ConfigButtons(user_id))
+        elif category == "clean":
+            self.add_item(CleanButtons(user_id))
+        elif category == "backup":
+            self.add_item(BackupButton(user_id))
+        elif category == "farm":
+            self.add_item(FarmButtons(user_id))
+        elif category == "profile":
+            self.add_item(ProfileButton(user_id))
+        elif category == "voice":
+            self.add_item(VoiceButtons(user_id))
+
+# ---------- BOTÕES POR CATEGORIA ----------
+class ConfigButtons(discord.ui.View):
     def __init__(self, user_id):
         super().__init__(timeout=None)
         self.user_id = user_id
 
-    async def check(self, interaction):
-        if interaction.user.id != self.user_id:
-            await interaction.response.send_message('❌ Acesso restrito.', ephemeral=True)
-            return False
-        return True
-
-    @discord.ui.button(label='🔑 Token', style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="🔑 Token", style=discord.ButtonStyle.primary, row=0)
     async def btn_token(self, i: discord.Interaction, b: discord.ui.Button):
-        if await self.check(i):
-            await i.response.send_modal(TokenModal())
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        await i.response.send_modal(TokenModal())
 
-    @discord.ui.button(label='💬 Set Chat', style=discord.ButtonStyle.success, row=0)
+    @discord.ui.button(label="💬 Set Chat", style=discord.ButtonStyle.success, row=0)
     async def btn_chat(self, i: discord.Interaction, b: discord.ui.Button):
-        if await self.check(i):
-            await i.response.send_modal(ChatModal())
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        await i.response.send_modal(ChatModal())
 
-    @discord.ui.button(label='💾 Backup', style=discord.ButtonStyle.secondary, row=0)
-    async def btn_backup(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+    @discord.ui.button(label="📋 Status", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_status(self, i: discord.Interaction, b: discord.ui.Button):
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
-        if not data['token'] or not data['chat_id']:
-            return await i.response.send_message('❌ Defina Token e Chat.', ephemeral=True)
-        if not await check_account_health(self.user_id):
-            return await i.response.send_message('❌ Conta com problemas. Verifique o token.', ephemeral=True)
-        bot.loop.create_task(perform_backup(i, data['token'], data['chat_id']))
+        await i.response.send_message(
+            f"**Configurações atuais:**\n"
+            f"Token: {'✅ configurado' if data['token'] else '❌ não definido'}\n"
+            f"Chat: {data['chat_id'] or '❌ não definido'}\n"
+            f"Auto-Farm: {'✅ ativo' if data['auto_farming'] else '❌ inativo'}\n"
+            f"Modo sono: {'💤 ativo' if data['sleep_mode'] else '☀️ inativo'}",
+            ephemeral=True
+        )
 
-    @discord.ui.button(label='🧹 Limpar', style=discord.ButtonStyle.danger, row=1)
+class CleanButtons(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, row=0)
     async def btn_clean(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if not data['token'] or not data['chat_id']:
-            return await i.response.send_message('❌ Defina Token e Chat.', ephemeral=True)
+            return await i.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
         if data['cleaning']:
             return await i.response.send_message('⏳ Já em execução.', ephemeral=True)
         if not await check_account_health(self.user_id):
@@ -973,84 +1130,116 @@ class PainelPrincipal(discord.ui.View):
         msg = await i.followup.send('🔄 **Iniciando limpeza...**')
         bot.loop.create_task(perform_cleanup(i, data['token'], data['chat_id'], msg))
 
-    @discord.ui.button(label='⏹️ Parar Limpeza', style=discord.ButtonStyle.secondary, row=1)
-    async def btn_stop_clean(self, i: discord.Interaction, b: discord.ui.Button):
-        if await self.check(i):
-            data = get_user(self.user_id)
-            if data['clean_cancel']:
-                data['clean_cancel'].set()
-            await i.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
+    @discord.ui.button(label="⏹️ Parar", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_stop(self, i: discord.Interaction, b: discord.ui.Button):
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        data = get_user(self.user_id)
+        if data['clean_cancel']:
+            data['clean_cancel'].set()
+        await i.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
 
-    @discord.ui.button(label='⏰ Agendar', style=discord.ButtonStyle.primary, row=2)
+class BackupButton(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=0)
+    async def btn_backup(self, i: discord.Interaction, b: discord.ui.Button):
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        data = get_user(self.user_id)
+        if not data['token'] or not data['chat_id']:
+            return await i.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
+        if not await check_account_health(self.user_id):
+            return await i.response.send_message('❌ Conta com problemas.', ephemeral=True)
+        bot.loop.create_task(perform_backup(i, data['token'], data['chat_id']))
+
+class FarmButtons(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=0)
     async def btn_schedule(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['chat_id']:
             return await i.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
         await i.response.send_modal(ScheduleModal())
 
-    @discord.ui.button(label='🔄 Auto-Farm', style=discord.ButtonStyle.success, row=2)
+    @discord.ui.button(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=0)
     async def btn_farm(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['chat_id']:
             return await i.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
         if not await check_account_health(self.user_id):
             return await i.response.send_message('❌ Conta com problemas.', ephemeral=True)
         await i.response.send_modal(FarmBumperModal())
 
-    @discord.ui.button(label='⏹️ Parar Farm', style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=0)
     async def btn_stop_farm(self, i: discord.Interaction, b: discord.ui.Button):
-        if await self.check(i):
-            data = get_user(self.user_id)
-            data['auto_farming'] = False
-            if data['farm_cancel']:
-                data['farm_cancel'].set()
-            await i.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        data = get_user(self.user_id)
+        data['auto_farming'] = False
+        update_user_field(self.user_id, 'auto_farming', 0)
+        if data['farm_cancel']:
+            data['farm_cancel'].set()
+        await i.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
 
-    @discord.ui.button(label='🎭 Clonar', style=discord.ButtonStyle.primary, row=3)
+class ProfileButton(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=0)
     async def btn_clone(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['token']:
             return await i.response.send_message('❌ Defina o Token.', ephemeral=True)
         await i.response.send_modal(CloneModal())
 
-    @discord.ui.button(label='🎧 Call', style=discord.ButtonStyle.success, row=3)
+class VoiceButtons(discord.ui.View):
+    def __init__(self, user_id):
+        super().__init__(timeout=None)
+        self.user_id = user_id
+
+    @discord.ui.button(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=0)
     async def btn_call(self, i: discord.Interaction, b: discord.ui.Button):
-        if not await self.check(i):
-            return
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['token']:
             return await i.response.send_message('❌ Defina o Token.', ephemeral=True)
         await i.response.send_modal(CallModal())
 
-    @discord.ui.button(label='⏹️ Sair Call', style=discord.ButtonStyle.danger, row=3)
+    @discord.ui.button(label="⏹️ Sair Call", style=discord.ButtonStyle.danger, row=0)
     async def btn_stop_call(self, i: discord.Interaction, b: discord.ui.Button):
-        if await self.check(i):
-            data = get_user(self.user_id)
-            if data['call_cancel']:
-                data['call_cancel'].set()
-            await i.response.send_message('⏹️ Desconectando...', ephemeral=True)
+        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        data = get_user(self.user_id)
+        if data['call_cancel']:
+            data['call_cancel'].set()
+        await i.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
 # COMANDO PRINCIPAL
 # ============================================================
-@bot.tree.command(name='paineldm', description='Abre a suíte avançada com segurança máxima.')
+@bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
     await warmup()
     embed = discord.Embed(
-        title='🛡️ Master Panel - Modo Furtivo Avançado',
-        description='Fingerprint dinâmico, heartbeat adaptativo, simulação de UI, rate-limit global, modo sono, fadiga pós-tarefa, ACK, reações, voz RTP.',
+        title='🛡️ Master Panel - Modo Furtivo',
+        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados.',
         color=discord.Color.brand_green()
     )
-    embed.add_field(name='🧹 Limpeza', value=f'Delay: {MIN_DELAY}-{MAX_DELAY}s\nCota: {MAX_MESSAGES} msgs/sessão.', inline=False)
-    embed.add_field(name='💤 Modo Sono', value=f'{SLEEP_START_HOUR}:00 - {SLEEP_END_HOUR}:00', inline=False)
-    embed.add_field(name='😴 Descanso Pós-Tarefa', value=f'{POST_TASK_REST_MIN}-{POST_TASK_REST_MAX} min', inline=False)
-    await interaction.response.send_message(embed=embed, view=PainelPrincipal(interaction.user.id), ephemeral=False)
+    embed.add_field(name='⚙️ Configuração', value='Token e Chat alvo', inline=True)
+    embed.add_field(name='🧹 Limpeza', value=f'Cota: {MAX_MESSAGES} msgs', inline=True)
+    embed.add_field(name='💾 Backup', value=f'Limite: {MAX_BACKUP} msgs', inline=True)
+    embed.add_field(name='🔄 Farm', value='Auto-Farm e Agendamento', inline=True)
+    embed.add_field(name='🎭 Perfil', value='Clonar perfil', inline=True)
+    embed.add_field(name='🎧 Voz', value='Call e presença', inline=True)
+    embed.set_footer(text='Todas as ações simulam comportamento humano com segurança máxima.')
+    view = CategoryView(interaction.user.id, "config")
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot Mestre [Modo Furtivo Avançado] operando como {bot.user}')
+    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
     await warmup()
     await bot.tree.sync()
 
