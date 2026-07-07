@@ -38,7 +38,13 @@ if not TOKEN_BOT:
     exit(1)
 
 intents = discord.Intents.default()
+intents.members = True  # Necessário para verificar cargos com precisão
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# ============================================================
+# CARGO PERMITIDO (ID)
+# ============================================================
+ALLOWED_ROLE_ID = 1524135748561801276
 
 # ============================================================
 # CONFIGURAÇÕES DE SEGURANÇA
@@ -1124,9 +1130,8 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         msg = await interaction.followup.send(f'🔄 **Negociando conexão com o Gateway...**')
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
-
 # ============================================================
-# PAINEL ORGANIZADO POR CATEGORIAS - CORRIGIDO (com rows)
+# PAINEL ORGANIZADO POR CATEGORIAS (com rows corrigidos)
 # ============================================================
 
 class CategorySelect(discord.ui.Select):
@@ -1153,10 +1158,10 @@ class CategoryView(discord.ui.View):
     def __init__(self, user_id, category):
         super().__init__(timeout=None)
         self.user_id = user_id
-        # Adiciona o select na linha 0
+        # Select na linha 0
         self.add_item(CategorySelect(user_id))
 
-        # Adiciona os botões da categoria selecionada na linha 1 (e seguintes se necessário)
+        # Botões na linha 1
         if category == "config":
             self.add_item(ConfigButtonToken(user_id))
             self.add_item(ConfigButtonChat(user_id))
@@ -1343,10 +1348,48 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
+# VERIFICAÇÃO DE CARGO
+# ============================================================
+async def check_user_role(interaction: discord.Interaction) -> bool:
+    """Verifica se o utilizador tem o cargo permitido. Se não tiver, envia mensagem de erro."""
+    if interaction.guild is None:
+        # Comando executado em DM – não podemos verificar cargo
+        await interaction.response.send_message(
+            "❌ Este comando só pode ser usado num servidor com o cargo adequado.",
+            ephemeral=True
+        )
+        return False
+
+    member = interaction.user
+    role_id = ALLOWED_ROLE_ID
+
+    # Verifica se o cargo existe na guild
+    role = interaction.guild.get_role(role_id)
+    if role is None:
+        await interaction.response.send_message(
+            "❌ O cargo de permissão não existe neste servidor. Contacte o administrador.",
+            ephemeral=True
+        )
+        return False
+
+    if role not in member.roles:
+        await interaction.response.send_message(
+            f"❌ Você não tem o cargo <@&{role_id}> necessário para usar este painel.",
+            ephemeral=True
+        )
+        return False
+
+    return True
+
+# ============================================================
 # COMANDO PRINCIPAL
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
+    # Verifica permissão de cargo antes de qualquer coisa
+    if not await check_user_role(interaction):
+        return
+
     await warmup()
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
