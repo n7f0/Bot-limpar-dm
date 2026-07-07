@@ -12,8 +12,18 @@ import math
 import socket
 import struct
 import secrets
-import psycopg2
-from psycopg2 import sql, extras
+import sqlite3
+import sys
+
+# Tentar importar psycopg2, se falhar usar SQLite
+try:
+    import psycopg2
+    from psycopg2 import sql, extras
+    USE_POSTGRES = True
+except ImportError:
+    USE_POSTGRES = False
+    print("⚠️ psycopg2 não instalado. Usando SQLite como fallback.")
+
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import AsyncSession
 import aiohttp
@@ -46,106 +56,147 @@ POST_TASK_REST_MIN = 5
 POST_TASK_REST_MAX = 15
 
 # ============================================================
-# BANCO DE DADOS POSTGRESQL
+# BANCO DE DADOS (POSTGRESQL OU SQLITE)
 # ============================================================
-DB_CONFIG = {
-    'host': os.getenv('POSTGRES_HOST', 'localhost'),
-    'port': os.getenv('POSTGRES_PORT', '5432'),
-    'user': os.getenv('POSTGRES_USER', 'postgres'),
-    'password': os.getenv('POSTGRES_PASSWORD', ''),
-    'database': os.getenv('POSTGRES_DATABASE', 'discord_bot'),
-}
-
-def get_db_connection():
-    try:
-        return psycopg2.connect(**DB_CONFIG)
-    except Exception as e:
-        print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
-        return None
+DB_TYPE = None  # 'postgres' ou 'sqlite'
 
 def init_db():
-    conn = get_db_connection()
-    if not conn:
-        return
+    global DB_TYPE
+    if USE_POSTGRES:
+        try:
+            conn = psycopg2.connect(
+                host=os.getenv('POSTGRES_HOST', 'localhost'),
+                port=os.getenv('POSTGRES_PORT', '5432'),
+                user=os.getenv('POSTGRES_USER', 'postgres'),
+                password=os.getenv('POSTGRES_PASSWORD', ''),
+                database=os.getenv('POSTGRES_DATABASE', 'discord_bot')
+            )
+            cursor = conn.cursor()
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS user_config (
+                    user_id BIGINT PRIMARY KEY,
+                    token TEXT,
+                    chat_id BIGINT,
+                    auto_farming BOOLEAN DEFAULT FALSE,
+                    farm_interval INTEGER DEFAULT 120,
+                    farm_message TEXT,
+                    sleep_mode BOOLEAN DEFAULT FALSE
+                )
+            ''')
+            conn.commit()
+            cursor.close()
+            conn.close()
+            DB_TYPE = 'postgres'
+            print("✅ Conectado ao PostgreSQL com sucesso.")
+            return True
+        except Exception as e:
+            print(f"⚠️ Erro ao conectar ao PostgreSQL: {e}")
+            print("⚠️ Usando SQLite como fallback.")
+
+    # Fallback para SQLite
+    DB_TYPE = 'sqlite'
+    conn = sqlite3.connect('config.db')
     cursor = conn.cursor()
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_config (
-            user_id BIGINT PRIMARY KEY,
+            user_id INTEGER PRIMARY KEY,
             token TEXT,
-            chat_id BIGINT,
-            auto_farming BOOLEAN DEFAULT FALSE,
+            chat_id INTEGER,
+            auto_farming INTEGER DEFAULT 0,
             farm_interval INTEGER DEFAULT 120,
             farm_message TEXT,
-            sleep_mode BOOLEAN DEFAULT FALSE
+            sleep_mode INTEGER DEFAULT 0
         )
     ''')
     conn.commit()
-    cursor.close()
     conn.close()
+    print("✅ Usando SQLite (config.db)")
+    return True
+
+init_db()
+
+def get_db_connection():
+    if DB_TYPE == 'postgres':
+        return psycopg2.connect(
+            host=os.getenv('POSTGRES_HOST', 'localhost'),
+            port=os.getenv('POSTGRES_PORT', '5432'),
+            user=os.getenv('POSTGRES_USER', 'postgres'),
+            password=os.getenv('POSTGRES_PASSWORD', ''),
+            database=os.getenv('POSTGRES_DATABASE', 'discord_bot')
+        )
+    else:
+        return sqlite3.connect('config.db')
 
 def load_user_config(user_id):
     conn = get_db_connection()
-    if not conn:
-        return None
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
-    cursor.execute(
-        'SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s',
-        (user_id,)
-    )
-    row = cursor.fetchone()
-    cursor.close()
+    cursor = conn.cursor()
+    if DB_TYPE == 'postgres':
+        cursor.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s', (user_id,))
+        row = cursor.fetchone()
+    else:
+        cursor.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
+        row = cursor.fetchone()
     conn.close()
     if row:
         return {
-            'token': row['token'],
-            'chat_id': row['chat_id'],
-            'auto_farming': row['auto_farming'],
-            'farm_interval': row['farm_interval'],
-            'farm_message': row['farm_message'],
-            'sleep_mode': row['sleep_mode']
+            'token': row[0],
+            'chat_id': row[1],
+            'auto_farming': bool(row[2]),
+            'farm_interval': row[3],
+            'farm_message': row[4],
+            'sleep_mode': bool(row[5])
         }
     return None
 
 def save_user_config(user_id, data):
     conn = get_db_connection()
-    if not conn:
-        return
     cursor = conn.cursor()
-    cursor.execute('''
-        INSERT INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (user_id) DO UPDATE SET
-            token = EXCLUDED.token,
-            chat_id = EXCLUDED.chat_id,
-            auto_farming = EXCLUDED.auto_farming,
-            farm_interval = EXCLUDED.farm_interval,
-            farm_message = EXCLUDED.farm_message,
-            sleep_mode = EXCLUDED.sleep_mode
-    ''', (
-        user_id,
-        data.get('token'),
-        data.get('chat_id'),
-        data.get('auto_farming', False),
-        data.get('farm_interval', 120),
-        data.get('farm_message', ''),
-        data.get('sleep_mode', False)
-    ))
+    if DB_TYPE == 'postgres':
+        cursor.execute('''
+            INSERT INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (user_id) DO UPDATE SET
+                token = EXCLUDED.token,
+                chat_id = EXCLUDED.chat_id,
+                auto_farming = EXCLUDED.auto_farming,
+                farm_interval = EXCLUDED.farm_interval,
+                farm_message = EXCLUDED.farm_message,
+                sleep_mode = EXCLUDED.sleep_mode
+        ''', (
+            user_id,
+            data.get('token'),
+            data.get('chat_id'),
+            data.get('auto_farming', False),
+            data.get('farm_interval', 120),
+            data.get('farm_message', ''),
+            data.get('sleep_mode', False)
+        ))
+    else:
+        cursor.execute('''
+            INSERT OR REPLACE INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        ''', (
+            user_id,
+            data.get('token'),
+            data.get('chat_id'),
+            1 if data.get('auto_farming') else 0,
+            data.get('farm_interval', 120),
+            data.get('farm_message', ''),
+            1 if data.get('sleep_mode') else 0
+        ))
     conn.commit()
-    cursor.close()
     conn.close()
 
 def update_user_field(user_id, field, value):
     conn = get_db_connection()
-    if not conn:
-        return
     cursor = conn.cursor()
-    query = sql.SQL("UPDATE user_config SET {} = %s WHERE user_id = %s").format(sql.Identifier(field))
-    cursor.execute(query, (value, user_id))
+    if DB_TYPE == 'postgres':
+        query = sql.SQL("UPDATE user_config SET {} = %s WHERE user_id = %s").format(sql.Identifier(field))
+        cursor.execute(query, (value, user_id))
+    else:
+        cursor.execute(f"UPDATE user_config SET {field} = ? WHERE user_id = ?", (value, user_id))
     conn.commit()
-    cursor.close()
     conn.close()
-
-init_db()
 
 # ============================================================
 # FUNÇÕES ESTATÍSTICAS
@@ -274,7 +325,7 @@ async def warmup(force=False):
         print(f"⚠️ Erro no warmup: {e}")
 
 # ============================================================
-# ESTRUTURA DE DADOS EM MEMÓRIA (SINCRONIZADA COM BD)
+# ESTRUTURA DE DADOS EM MEMÓRIA
 # ============================================================
 user_data = {}
 
@@ -362,13 +413,13 @@ async def check_sleep_mode(user_id: int) -> bool:
     if is_sleep_time():
         if not data.get('sleep_mode'):
             data['sleep_mode'] = True
-            update_user_field(user_id, 'sleep_mode', True)
+            update_user_field(user_id, 'sleep_mode', True if DB_TYPE == 'postgres' else 1)
             print(f"💤 Modo sono ativado para {user_id}")
         return True
     else:
         if data.get('sleep_mode'):
             data['sleep_mode'] = False
-            update_user_field(user_id, 'sleep_mode', False)
+            update_user_field(user_id, 'sleep_mode', False if DB_TYPE == 'postgres' else 0)
             print(f"☀️ Modo sono desativado para {user_id}")
         return False
 
@@ -1074,8 +1125,10 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL ORGANIZADO POR CATEGORIAS (COM SELECT MENU)
+# PAINEL ORGANIZADO POR CATEGORIAS - CORRIGIDO
 # ============================================================
+
+# === Select para escolher categoria ===
 class CategorySelect(discord.ui.Select):
     def __init__(self, user_id):
         self.user_id = user_id
@@ -1093,49 +1146,69 @@ class CategorySelect(discord.ui.Select):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         category = self.values[0]
+        # Cria a view da categoria selecionada
         view = CategoryView(self.user_id, category)
         await interaction.response.edit_message(view=view)
 
+# === View principal que contém o select e os botões da categoria ===
 class CategoryView(discord.ui.View):
     def __init__(self, user_id, category):
         super().__init__(timeout=None)
         self.user_id = user_id
+        # Adiciona o select (sempre presente)
         self.add_item(CategorySelect(user_id))
-
+        
+        # Adiciona os botões da categoria selecionada
         if category == "config":
-            self.add_item(ConfigButtons(user_id))
+            self.add_item(ConfigButtonToken(user_id))
+            self.add_item(ConfigButtonChat(user_id))
+            self.add_item(ConfigButtonStatus(user_id))
         elif category == "clean":
-            self.add_item(CleanButtons(user_id))
+            self.add_item(CleanButtonStart(user_id))
+            self.add_item(CleanButtonStop(user_id))
         elif category == "backup":
             self.add_item(BackupButton(user_id))
         elif category == "farm":
-            self.add_item(FarmButtons(user_id))
+            self.add_item(FarmButtonSchedule(user_id))
+            self.add_item(FarmButtonConfig(user_id))
+            self.add_item(FarmButtonStop(user_id))
         elif category == "profile":
-            self.add_item(ProfileButton(user_id))
+            self.add_item(ProfileButtonClone(user_id))
         elif category == "voice":
-            self.add_item(VoiceButtons(user_id))
+            self.add_item(VoiceButtonCall(user_id))
+            self.add_item(VoiceButtonStop(user_id))
 
-# ---------- BOTÕES POR CATEGORIA ----------
-class ConfigButtons(discord.ui.View):
+# === BOTÕES DE CONFIGURAÇÃO ===
+class ConfigButtonToken(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="🔑 Token", style=discord.ButtonStyle.primary, row=0)
-    async def btn_token(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        await i.response.send_modal(TokenModal())
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        await interaction.response.send_modal(TokenModal())
 
-    @discord.ui.button(label="💬 Set Chat", style=discord.ButtonStyle.success, row=0)
-    async def btn_chat(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
-        await i.response.send_modal(ChatModal())
+class ConfigButtonChat(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="💬 Set Chat", style=discord.ButtonStyle.success, row=0)
+        self.user_id = user_id
 
-    @discord.ui.button(label="📋 Status", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_status(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
+        await interaction.response.send_modal(ChatModal())
+
+class ConfigButtonStatus(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="📋 Status", style=discord.ButtonStyle.secondary, row=0)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
-        await i.response.send_message(
+        await interaction.response.send_message(
             f"**Configurações atuais:**\n"
             f"Token: {'✅ configurado' if data['token'] else '❌ não definido'}\n"
             f"Chat: {data['chat_id'] or '❌ não definido'}\n"
@@ -1144,122 +1217,147 @@ class ConfigButtons(discord.ui.View):
             ephemeral=True
         )
 
-class CleanButtons(discord.ui.View):
+# === BOTÕES DE LIMPEZA ===
+class CleanButtonStart(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, row=0)
-    async def btn_clean(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if not data['token'] or not data['chat_id']:
-            return await i.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
+            return await interaction.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
         if data['cleaning']:
-            return await i.response.send_message('⏳ Já em execução.', ephemeral=True)
+            return await interaction.response.send_message('⏳ Já em execução.', ephemeral=True)
         if not await check_account_health(self.user_id):
-            return await i.response.send_message('❌ Conta com problemas.', ephemeral=True)
+            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
         data['cleaning'] = True
         data['clean_cancel'] = asyncio.Event()
-        await i.response.defer()
-        msg = await i.followup.send('🔄 **Iniciando limpeza...**')
-        bot.loop.create_task(perform_cleanup(i, data['token'], data['chat_id'], msg))
+        await interaction.response.defer()
+        msg = await interaction.followup.send('🔄 **Iniciando limpeza...**')
+        bot.loop.create_task(perform_cleanup(interaction, data['token'], data['chat_id'], msg))
 
-    @discord.ui.button(label="⏹️ Parar", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_stop(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+class CleanButtonStop(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="⏹️ Parar", style=discord.ButtonStyle.secondary, row=0)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if data['clean_cancel']:
             data['clean_cancel'].set()
-        await i.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
+        await interaction.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
 
-class BackupButton(discord.ui.View):
+# === BOTÃO DE BACKUP ===
+class BackupButton(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=0)
-    async def btn_backup(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if not data['token'] or not data['chat_id']:
-            return await i.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
+            return await interaction.response.send_message('❌ Configure Token e Chat primeiro.', ephemeral=True)
         if not await check_account_health(self.user_id):
-            return await i.response.send_message('❌ Conta com problemas.', ephemeral=True)
-        bot.loop.create_task(perform_backup(i, data['token'], data['chat_id']))
+            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
+        bot.loop.create_task(perform_backup(interaction, data['token'], data['chat_id']))
 
-class FarmButtons(discord.ui.View):
+# === BOTÕES DE FARM ===
+class FarmButtonSchedule(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=0)
-    async def btn_schedule(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['chat_id']:
-            return await i.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
-        await i.response.send_modal(ScheduleModal())
+            return await interaction.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
+        await interaction.response.send_modal(ScheduleModal())
 
-    @discord.ui.button(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=0)
-    async def btn_farm(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+class FarmButtonConfig(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=0)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['chat_id']:
-            return await i.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
+            return await interaction.response.send_message('❌ Defina Chat Alvo.', ephemeral=True)
         if not await check_account_health(self.user_id):
-            return await i.response.send_message('❌ Conta com problemas.', ephemeral=True)
-        await i.response.send_modal(FarmBumperModal())
+            return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
+        await interaction.response.send_modal(FarmBumperModal())
 
-    @discord.ui.button(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=0)
-    async def btn_stop_farm(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+class FarmButtonStop(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=0)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         data['auto_farming'] = False
-        update_user_field(self.user_id, 'auto_farming', False)
+        update_user_field(self.user_id, 'auto_farming', False if DB_TYPE == 'postgres' else 0)
         if data['farm_cancel']:
             data['farm_cancel'].set()
-        await i.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
+        await interaction.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
 
-class ProfileButton(discord.ui.View):
+# === BOTÃO DE PERFIL ===
+class ProfileButtonClone(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=0)
-    async def btn_clone(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['token']:
-            return await i.response.send_message('❌ Defina o Token.', ephemeral=True)
-        await i.response.send_modal(CloneModal())
+            return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
+        await interaction.response.send_modal(CloneModal())
 
-class VoiceButtons(discord.ui.View):
+# === BOTÕES DE VOZ ===
+class VoiceButtonCall(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(timeout=None)
+        super().__init__(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=0)
         self.user_id = user_id
 
-    @discord.ui.button(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=0)
-    async def btn_call(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         if not get_user(self.user_id)['token']:
-            return await i.response.send_message('❌ Defina o Token.', ephemeral=True)
-        await i.response.send_modal(CallModal())
+            return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
+        await interaction.response.send_modal(CallModal())
 
-    @discord.ui.button(label="⏹️ Sair Call", style=discord.ButtonStyle.danger, row=0)
-    async def btn_stop_call(self, i: discord.Interaction, b: discord.ui.Button):
-        if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
+class VoiceButtonStop(discord.ui.Button):
+    def __init__(self, user_id):
+        super().__init__(label="⏹️ Sair Call", style=discord.ButtonStyle.danger, row=0)
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         if data['call_cancel']:
             data['call_cancel'].set()
-        await i.response.send_message('⏹️ Desconectando...', ephemeral=True)
+        await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
 # COMANDO PRINCIPAL
 # ============================================================
-@bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados (PostgreSQL).')
+@bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
     await warmup()
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
-        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados PostgreSQL.',
+        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados.',
         color=discord.Color.brand_green()
     )
     embed.add_field(name='⚙️ Configuração', value='Token e Chat alvo', inline=True)
