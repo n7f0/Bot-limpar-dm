@@ -231,13 +231,16 @@ async def check_account_health(user_id: int) -> bool:
     headers = build_headers({"Authorization": token})
     try:
         resp = await session.get("https://discord.com/api/v10/users/@me", headers=headers)
-        if resp.status == 200:
+        print(f"🔍 Health check status: {resp.status_code}")  # Debug
+        if resp.status_code == 200:
             data['account_healthy'] = True
             return True
         else:
             data['account_healthy'] = False
+            print(f"⚠️ Health check falhou com status {resp.status_code}")
             return False
-    except:
+    except Exception as e:
+        print(f"⚠️ Exceção no health check: {e}")
         data['account_healthy'] = False
         return False
 
@@ -259,22 +262,20 @@ async def check_resting(user_id: int) -> bool:
 async def request_with_rate_limit(method: str, url: str, headers: dict = None, json_data: dict = None, **kwargs):
     if not headers:
         headers = build_headers()
-    # A sessão `session` é do tipo AsyncSession, e `request` é uma corrotina
     resp = await session.request(method, url, headers=headers, json=json_data, **kwargs)
 
-    # Lê cabeçalhos de rate limit
-    remaining = resp.headers.get('X-RateLimit-Remaining')
-    reset_after = resp.headers.get('X-RateLimit-Reset-After')
-    global_limit = resp.headers.get('X-RateLimit-Global')
-
-    if resp.status == 429:
+    # Agora usamos status_code
+    if resp.status_code == 429:
         retry_after = float(resp.headers.get('Retry-After', 5))
+        global_limit = resp.headers.get('X-RateLimit-Global')
         if global_limit and global_limit.lower() == 'true':
             await asyncio.sleep(retry_after + random.uniform(0.5, 2.0))
         else:
             await asyncio.sleep(retry_after + random.uniform(0.5, 1.5))
         return await request_with_rate_limit(method, url, headers, json_data, **kwargs)
 
+    # Atualiza rate limit se houver
+    remaining = resp.headers.get('X-RateLimit-Remaining')
     if remaining is not None and int(remaining) < 5:
         await asyncio.sleep(random.uniform(1.0, 3.0))
 
@@ -606,7 +607,7 @@ async def perform_backup(interaction: discord.Interaction, token, chat_id):
             url += f'&before={last_id}'
 
         resp = await request_with_rate_limit('GET', url, headers=headers)
-        if resp.status != 200:
+        if resp.status_code != 200:
             break
         msgs = resp.json()
         if not msgs:
@@ -654,7 +655,7 @@ async def perform_clone(user_id, target_id, progress_msg):
     headers = build_headers({"Authorization": data['token']})
 
     resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/users/{target_id}', headers=headers)
-    if resp.status != 200:
+    if resp.status_code != 200:
         return await progress_msg.edit(content='❌ Usuário alvo não encontrado.')
     target_data = resp.json()
 
@@ -666,7 +667,7 @@ async def perform_clone(user_id, target_id, progress_msg):
         av_hash = target_data['avatar']
         av_url = f"https://cdn.discordapp.com/avatars/{target_id}/{av_hash}.png?size=1024"
         av_resp = await request_with_rate_limit('GET', av_url, headers=headers)
-        if av_resp.status == 200:
+        if av_resp.status_code == 200:
             av_bytes = av_resp.content
             av_b64 = base64.b64encode(av_bytes).decode('utf-8')
             payload['avatar'] = f"data:image/png;base64,{av_b64}"
@@ -676,10 +677,10 @@ async def perform_clone(user_id, target_id, progress_msg):
     if payload:
         patch_resp = await request_with_rate_limit('PATCH', 'https://discord.com/api/v10/users/@me',
                                                    headers=headers, json_data=payload)
-        if patch_resp.status == 200:
+        if patch_resp.status_code == 200:
             await progress_msg.edit(content='✅ **Perfil clonado com sucesso!**')
         else:
-            await progress_msg.edit(content=f'❌ Erro ao atualizar perfil: {patch_resp.status}')
+            await progress_msg.edit(content=f'❌ Erro ao atualizar perfil: {patch_resp.status_code}')
     else:
         await progress_msg.edit(content='⚠️ O alvo não tem avatar ou bio configurada.')
     await post_task_rest(user_id)
@@ -714,7 +715,7 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
             url += f'&before={last_id}'
 
         resp = await request_with_rate_limit('GET', url, headers=headers)
-        if resp.status != 200:
+        if resp.status_code != 200:
             break
         messages = resp.json()
         if not messages:
@@ -728,7 +729,7 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
             if msg['author']['id'] == str(interaction.user.id):
                 del_url = f'https://discord.com/api/v10/channels/{chat_id}/messages/{msg["id"]}'
                 del_resp = await request_with_rate_limit('DELETE', del_url, headers=headers)
-                if del_resp.status == 204:
+                if del_resp.status_code == 204:
                     messages_deleted += 1
                     if messages_deleted % PAUSE_AFTER == 0:
                         pausa = random.uniform(PAUSE_DUR_MIN, PAUSE_DUR_MAX)
@@ -765,9 +766,12 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
 
     async with aiohttp.ClientSession() as aio_session:
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
-        if resp.status != 200:
+        if resp.status_code != 200:
             return await progress_msg.edit(content='❌ Erro ao acessar o canal.')
-        guild_id = (await resp.json()).get('guild_id')
+        channel_data = resp.json()
+        guild_id = channel_data.get('guild_id')
+        if not guild_id:
+            return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
         # WebSocket de voz
         voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
@@ -830,7 +834,7 @@ class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
         start_science(interaction.user.id)
         healthy = await check_account_health(interaction.user.id)
         if not healthy:
-            await interaction.followup.send('⚠️ Token parece inválido ou conta restrita.', ephemeral=True)
+            await interaction.followup.send('⚠️ Token parece inválido ou conta restrita. Verifique se é um token de usuário (não de bot).', ephemeral=True)
 
 class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
     chat_input = discord.ui.TextInput(label='ID do Canal/DM', style=discord.TextStyle.short, required=True)
@@ -846,7 +850,7 @@ class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
 
         headers = build_headers({"Authorization": data['token']})
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{chat_id}', headers=headers)
-        if resp.status != 200:
+        if resp.status_code != 200:
             return await interaction.response.send_message('❌ Canal não encontrado ou sem permissão.', ephemeral=True)
 
         data['chat_id'] = chat_id
