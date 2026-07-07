@@ -12,7 +12,8 @@ import math
 import socket
 import struct
 import secrets
-import sqlite3
+import psycopg2
+from psycopg2 import sql, extras
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import AsyncSession
 import aiohttp
@@ -45,68 +46,103 @@ POST_TASK_REST_MIN = 5
 POST_TASK_REST_MAX = 15
 
 # ============================================================
-# BANCO DE DADOS SQLITE
+# BANCO DE DADOS POSTGRESQL
 # ============================================================
-DB_PATH = "config.db"
+DB_CONFIG = {
+    'host': os.getenv('POSTGRES_HOST', 'localhost'),
+    'port': os.getenv('POSTGRES_PORT', '5432'),
+    'user': os.getenv('POSTGRES_USER', 'postgres'),
+    'password': os.getenv('POSTGRES_PASSWORD', ''),
+    'database': os.getenv('POSTGRES_DATABASE', 'discord_bot'),
+}
+
+def get_db_connection():
+    try:
+        return psycopg2.connect(**DB_CONFIG)
+    except Exception as e:
+        print(f"❌ Erro ao conectar ao PostgreSQL: {e}")
+        return None
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
+    conn = get_db_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    cursor.execute('''
         CREATE TABLE IF NOT EXISTS user_config (
-            user_id INTEGER PRIMARY KEY,
+            user_id BIGINT PRIMARY KEY,
             token TEXT,
-            chat_id INTEGER,
-            auto_farming INTEGER DEFAULT 0,
+            chat_id BIGINT,
+            auto_farming BOOLEAN DEFAULT FALSE,
             farm_interval INTEGER DEFAULT 120,
             farm_message TEXT,
-            sleep_mode INTEGER DEFAULT 0
+            sleep_mode BOOLEAN DEFAULT FALSE
         )
     ''')
     conn.commit()
+    cursor.close()
     conn.close()
 
 def load_user_config(user_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = ?', (user_id,))
-    row = c.fetchone()
+    conn = get_db_connection()
+    if not conn:
+        return None
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.DictCursor)
+    cursor.execute(
+        'SELECT token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode FROM user_config WHERE user_id = %s',
+        (user_id,)
+    )
+    row = cursor.fetchone()
+    cursor.close()
     conn.close()
     if row:
         return {
-            'token': row[0],
-            'chat_id': row[1],
-            'auto_farming': bool(row[2]),
-            'farm_interval': row[3],
-            'farm_message': row[4],
-            'sleep_mode': bool(row[5])
+            'token': row['token'],
+            'chat_id': row['chat_id'],
+            'auto_farming': row['auto_farming'],
+            'farm_interval': row['farm_interval'],
+            'farm_message': row['farm_message'],
+            'sleep_mode': row['sleep_mode']
         }
     return None
 
 def save_user_config(user_id, data):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''
-        INSERT OR REPLACE INTO user_config
-        (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+    conn = get_db_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    cursor.execute('''
+        INSERT INTO user_config (user_id, token, chat_id, auto_farming, farm_interval, farm_message, sleep_mode)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (user_id) DO UPDATE SET
+            token = EXCLUDED.token,
+            chat_id = EXCLUDED.chat_id,
+            auto_farming = EXCLUDED.auto_farming,
+            farm_interval = EXCLUDED.farm_interval,
+            farm_message = EXCLUDED.farm_message,
+            sleep_mode = EXCLUDED.sleep_mode
     ''', (
         user_id,
         data.get('token'),
         data.get('chat_id'),
-        1 if data.get('auto_farming') else 0,
+        data.get('auto_farming', False),
         data.get('farm_interval', 120),
         data.get('farm_message', ''),
-        1 if data.get('sleep_mode') else 0
+        data.get('sleep_mode', False)
     ))
     conn.commit()
+    cursor.close()
     conn.close()
 
 def update_user_field(user_id, field, value):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute(f'UPDATE user_config SET {field} = ? WHERE user_id = ?', (value, user_id))
+    conn = get_db_connection()
+    if not conn:
+        return
+    cursor = conn.cursor()
+    query = sql.SQL("UPDATE user_config SET {} = %s WHERE user_id = %s").format(sql.Identifier(field))
+    cursor.execute(query, (value, user_id))
     conn.commit()
+    cursor.close()
     conn.close()
 
 init_db()
@@ -244,7 +280,6 @@ user_data = {}
 
 def get_user(user_id):
     if user_id not in user_data:
-        # Carrega do banco
         config = load_user_config(user_id)
         if config:
             user_data[user_id] = {
@@ -327,13 +362,13 @@ async def check_sleep_mode(user_id: int) -> bool:
     if is_sleep_time():
         if not data.get('sleep_mode'):
             data['sleep_mode'] = True
-            update_user_field(user_id, 'sleep_mode', 1)
+            update_user_field(user_id, 'sleep_mode', True)
             print(f"💤 Modo sono ativado para {user_id}")
         return True
     else:
         if data.get('sleep_mode'):
             data['sleep_mode'] = False
-            update_user_field(user_id, 'sleep_mode', 0)
+            update_user_field(user_id, 'sleep_mode', False)
             print(f"☀️ Modo sono desativado para {user_id}")
         return False
 
@@ -1179,7 +1214,7 @@ class FarmButtons(discord.ui.View):
         if i.user.id != self.user_id: return await i.response.send_message("❌ Acesso restrito.", ephemeral=True)
         data = get_user(self.user_id)
         data['auto_farming'] = False
-        update_user_field(self.user_id, 'auto_farming', 0)
+        update_user_field(self.user_id, 'auto_farming', False)
         if data['farm_cancel']:
             data['farm_cancel'].set()
         await i.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
@@ -1219,12 +1254,12 @@ class VoiceButtons(discord.ui.View):
 # ============================================================
 # COMANDO PRINCIPAL
 # ============================================================
-@bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
+@bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados (PostgreSQL).')
 async def paineldm(interaction: discord.Interaction):
     await warmup()
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
-        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados.',
+        description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente no banco de dados PostgreSQL.',
         color=discord.Color.brand_green()
     )
     embed.add_field(name='⚙️ Configuração', value='Token e Chat alvo', inline=True)
