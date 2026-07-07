@@ -1124,11 +1124,11 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         msg = await interaction.followup.send(f'🔄 **Negociando conexão com o Gateway...**')
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
+
 # ============================================================
-# PAINEL ORGANIZADO POR CATEGORIAS - CORRIGIDO
+# PAINEL ORGANIZADO POR CATEGORIAS - CORRIGIDO (com rows)
 # ============================================================
 
-# === Select para escolher categoria ===
 class CategorySelect(discord.ui.Select):
     def __init__(self, user_id):
         self.user_id = user_id
@@ -1140,25 +1140,23 @@ class CategorySelect(discord.ui.Select):
             discord.SelectOption(label="🎭 Perfil", value="profile", description="Clonar perfil", emoji="👤"),
             discord.SelectOption(label="🎧 Voz", value="voice", description="Call e presença", emoji="🔊"),
         ]
-        super().__init__(placeholder="📂 Escolha uma categoria...", options=options, custom_id="category_select")
+        super().__init__(placeholder="📂 Escolha uma categoria...", options=options, row=0)
 
     async def callback(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
             return await interaction.response.send_message("❌ Acesso restrito.", ephemeral=True)
         category = self.values[0]
-        # Cria a view da categoria selecionada
         view = CategoryView(self.user_id, category)
         await interaction.response.edit_message(view=view)
 
-# === View principal que contém o select e os botões da categoria ===
 class CategoryView(discord.ui.View):
     def __init__(self, user_id, category):
         super().__init__(timeout=None)
         self.user_id = user_id
-        # Adiciona o select (sempre presente)
+        # Adiciona o select na linha 0
         self.add_item(CategorySelect(user_id))
-        
-        # Adiciona os botões da categoria selecionada
+
+        # Adiciona os botões da categoria selecionada na linha 1 (e seguintes se necessário)
         if category == "config":
             self.add_item(ConfigButtonToken(user_id))
             self.add_item(ConfigButtonChat(user_id))
@@ -1178,10 +1176,10 @@ class CategoryView(discord.ui.View):
             self.add_item(VoiceButtonCall(user_id))
             self.add_item(VoiceButtonStop(user_id))
 
-# === BOTÕES DE CONFIGURAÇÃO ===
+# ---------- BOTÕES (todos com row=1) ----------
 class ConfigButtonToken(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1191,7 +1189,7 @@ class ConfigButtonToken(discord.ui.Button):
 
 class ConfigButtonChat(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="💬 Set Chat", style=discord.ButtonStyle.success, row=0)
+        super().__init__(label="💬 Set Chat", style=discord.ButtonStyle.success, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1201,7 +1199,7 @@ class ConfigButtonChat(discord.ui.Button):
 
 class ConfigButtonStatus(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="📋 Status", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(label="📋 Status", style=discord.ButtonStyle.secondary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1217,10 +1215,9 @@ class ConfigButtonStatus(discord.ui.Button):
             ephemeral=True
         )
 
-# === BOTÕES DE LIMPEZA ===
 class CleanButtonStart(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, row=0)
+        super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1241,7 +1238,7 @@ class CleanButtonStart(discord.ui.Button):
 
 class CleanButtonStop(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="⏹️ Parar", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(label="⏹️ Parar", style=discord.ButtonStyle.secondary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1252,10 +1249,9 @@ class CleanButtonStop(discord.ui.Button):
             data['clean_cancel'].set()
         await interaction.response.send_message('⏹️ Abortando limpeza...', ephemeral=True)
 
-# === BOTÃO DE BACKUP ===
 class BackupButton(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(label="💾 Iniciar Backup", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1268,10 +1264,9 @@ class BackupButton(discord.ui.Button):
             return await interaction.response.send_message('❌ Conta com problemas.', ephemeral=True)
         bot.loop.create_task(perform_backup(interaction, data['token'], data['chat_id']))
 
-# === BOTÕES DE FARM ===
 class FarmButtonSchedule(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1283,7 +1278,7 @@ class FarmButtonSchedule(discord.ui.Button):
 
 class FarmButtonConfig(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=0)
+        super().__init__(label="🔄 Configurar Farm", style=discord.ButtonStyle.success, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1297,7 +1292,7 @@ class FarmButtonConfig(discord.ui.Button):
 
 class FarmButtonStop(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=0)
+        super().__init__(label="⏹️ Parar Farm", style=discord.ButtonStyle.secondary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1310,10 +1305,9 @@ class FarmButtonStop(discord.ui.Button):
             data['farm_cancel'].set()
         await interaction.response.send_message('⏹️ Farm interrompido.', ephemeral=True)
 
-# === BOTÃO DE PERFIL ===
 class ProfileButtonClone(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=0)
+        super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1323,10 +1317,9 @@ class ProfileButtonClone(discord.ui.Button):
             return await interaction.response.send_message('❌ Defina o Token.', ephemeral=True)
         await interaction.response.send_modal(CloneModal())
 
-# === BOTÕES DE VOZ ===
 class VoiceButtonCall(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=0)
+        super().__init__(label="🎧 Entrar Call", style=discord.ButtonStyle.success, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
@@ -1338,7 +1331,7 @@ class VoiceButtonCall(discord.ui.Button):
 
 class VoiceButtonStop(discord.ui.Button):
     def __init__(self, user_id):
-        super().__init__(label="⏹️ Sair Call", style=discord.ButtonStyle.danger, row=0)
+        super().__init__(label="⏹️ Sair Call", style=discord.ButtonStyle.danger, row=1)
         self.user_id = user_id
 
     async def callback(self, interaction: discord.Interaction):
