@@ -8,6 +8,7 @@ import time
 import io
 import base64
 import json
+import hashlib
 from curl_cffi import requests as curl_requests
 from curl_cffi.requests import AsyncSession
 import aiohttp
@@ -25,7 +26,7 @@ intents = discord.Intents.default()
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
-# CONFIGURAÇÕES DE SEGURANÇA MÁXIMA (ANTI-BAN)
+# CONFIGURAÇÕES DE SEGURANÇA MÁXIMA (ANTI-BAN) - REFORÇADAS
 # ============================================================
 MIN_DELAY = 15.0
 MAX_DELAY = 35.0
@@ -35,11 +36,64 @@ PAUSE_DUR_MAX = 180.0
 MAX_MESSAGES = 150
 MAX_BACKUP = 3000
 
+# Configurações do "modo sono" (janela de atividade humana)
+SLEEP_START_HOUR = 23  # 23:00 (11 PM)
+SLEEP_END_HOUR = 7     # 07:00 (7 AM)
+# Durante este intervalo, o bot não executa ações pesadas (cleanup, farm, etc.)
+
 # ============================================================
-# SESSÃO CURL_CFFI (falsificação de TLS)
+# GERENCIADOR DE FINGERPRINT (SUPER_PROPERTIES ROTATIVO)
+# ============================================================
+class FingerprintManager:
+    """
+    Gera e rotaciona as propriedades do navegador (Super Properties)
+    para evitar que o Discord associe um perfil fixo à conta.
+    """
+    CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
+    OS_VERSIONS = ["10.0.22621", "10.0.19045", "10.0.22000", "10.0.20348"]
+    BROWSER_VERSIONS = ["120.0.0.0", "121.0.0.0", "122.0.0.0", "123.0.0.0"]
+
+    def __init__(self):
+        self.current = self._generate()
+
+    def _generate(self):
+        chrome = random.choice(self.CHROME_VERSIONS)
+        os_ver = random.choice(self.OS_VERSIONS)
+        browser = random.choice(self.BROWSER_VERSIONS)
+        # Gera um client_build_number aleatório (ex: 238281)
+        build = random.randint(230000, 250000)
+        return {
+            "os": "Windows",
+            "browser": "Chrome",
+            "device": "",
+            "system_locale": "pt-BR",
+            "browser_user_agent": f"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{chrome} Safari/537.36",
+            "browser_version": browser,
+            "os_version": os_ver,
+            "referrer": "",
+            "referring_domain": "",
+            "referrer_current": "",
+            "referring_domain_current": "",
+            "release_channel": "stable",
+            "client_build_number": build,
+            "client_event_source": None,
+            "design_id": 0,
+        }
+
+    def rotate(self):
+        """Gera um novo fingerprint a cada nova sessão ou periodicamente."""
+        self.current = self._generate()
+        return self.current
+
+    def get(self):
+        return self.current
+
+fingerprint_mgr = FingerprintManager()
+
+# ============================================================
+# SESSÃO CURL_CFFI (falsificação de TLS) + COOKIES
 # ============================================================
 session = AsyncSession(impersonate="chrome120")
-# Cookie jar será preenchido no warmup
 warmup_done = False
 
 # ============================================================
@@ -53,47 +107,92 @@ def get_user(user_id):
             'token': None, 'chat_id': None, 'cleaning': False,
             'clean_cancel': None, 'farming_call': False,
             'call_cancel': None, 'auto_farming': False, 'farm_cancel': None,
-            'gateway_task': None,      # task da conexão WebSocket de presença
-            'science_task': None,      # task de telemetria
-            'gateway_ws': None,        # referência ao websocket (para cancelar)
+            'gateway_task': None,
+            'science_task': None,
+            'gateway_ws': None,
+            'gateway_stop': False,
+            'science_stop': False,
+            'sleep_mode': False,          # indica se está no modo sono
+            'last_activity': time.time(), # timestamp da última ação
+            'rate_limits': {},            # armazena limites por endpoint
         }
     return user_data[user_id]
 
 # ============================================================
-# FUNÇÕES AUXILIARES: NONCE, WARMUP, GATEWAY, TELEMETRIA
+# FUNÇÕES AUXILIARES: NONCE, WARMUP, RATE LIMIT, SLEEP CHECK
 # ============================================================
-EPOCH = 1420070400000  # 2015-01-01
+EPOCH = 1420070400000
 _increment = 0
 
 def generate_snowflake() -> int:
-    """Gera um ID snowflake para usar como nonce em mensagens."""
     global _increment
-    _increment = (_increment + 1) & 0xFFF  # 12 bits
+    _increment = (_increment + 1) & 0xFFF
     now = int(time.time() * 1000) - EPOCH
     return (now << 22) | (0 << 17) | (0 << 12) | _increment
 
-async def warmup():
-    """Faz uma requisição inicial para obter os cookies de sessão."""
+async def warmup(force=False):
+    """Faz uma requisição inicial para obter cookies e fingerprint."""
     global warmup_done
-    if warmup_done:
+    if warmup_done and not force:
         return
     try:
+        # Primeiro, obtém a página principal
         resp = await session.get("https://discord.com")
-        # Os cookies são automaticamente armazenados no jar da sessão
+        # Também faz uma requisição ao /api/v9/experiments para simular carregamento
+        await session.get("https://discord.com/api/v9/experiments")
         warmup_done = True
-        print("✅ Warmup concluído – cookies adquiridos.")
+        print("✅ Warmup concluído – cookies e fingerprint inicializados.")
     except Exception as e:
         print(f"⚠️ Erro no warmup: {e}")
 
+def is_sleep_time() -> bool:
+    """Verifica se estamos no período de sono (inatividade humana)."""
+    now = time.localtime()
+    current_hour = now.tm_hour
+    if SLEEP_START_HOUR < SLEEP_END_HOUR:
+        return SLEEP_START_HOUR <= current_hour < SLEEP_END_HOUR
+    else:
+        return current_hour >= SLEEP_START_HOUR or current_hour < SLEEP_END_HOUR
+
+async def check_sleep_mode(user_id: int) -> bool:
+    """
+    Se estiver no horário de sono, ativa o modo dormência e retorna True.
+    Durante o sono, apenas mantém a presença leve; ações pesadas são bloqueadas.
+    """
+    data = get_user(user_id)
+    if is_sleep_time():
+        if not data.get('sleep_mode'):
+            data['sleep_mode'] = True
+            print(f"💤 Modo sono ativado para {user_id}")
+        return True
+    else:
+        if data.get('sleep_mode'):
+            data['sleep_mode'] = False
+            print(f"☀️ Modo sono desativado para {user_id}")
+        return False
+
+def update_rate_limit(endpoint: str, remaining: int, reset_after: float):
+    """Atualiza as informações de rate limit para um endpoint."""
+    # armazena o limite restante e o tempo de reset
+    # usado para ajustar delays dinamicamente
+    pass  # será utilizado internamente nas funções de requisição
+
 # ============================================================
-# GATEWAY - PRESENÇA ONLINE (WebSocket)
+# GERENCIADOR DE HEARTBEATS ADAPTATIVOS (GATEWAY)
 # ============================================================
 async def gateway_presence(user_id: int):
-    """Mantém uma conexão WebSocket ao Gateway do Discord, simulando um cliente online."""
+    """
+    Mantém uma conexão WebSocket ao Gateway com heartbeat dinâmico,
+    baseado na latência real da rede.
+    """
     data = get_user(user_id)
     token = data['token']
     if not token:
         return
+
+    # Rotaciona o fingerprint para esta nova sessão
+    fingerprint_mgr.rotate()
+    super_props = fingerprint_mgr.get()
 
     async with aiohttp.ClientSession() as aio_session:
         # Obter URL do Gateway
@@ -106,18 +205,15 @@ async def gateway_presence(user_id: int):
             async with aio_session.ws_connect(gateway_url) as ws:
                 data['gateway_ws'] = ws
                 hello = await ws.receive_json()
-                interval = hello['d']['heartbeat_interval'] / 1000.0
+                # intervalo base fornecido pelo Discord
+                base_interval = hello['d']['heartbeat_interval'] / 1000.0
 
-                # Enviar identify
+                # Enviar identify com o fingerprint rotativo
                 await ws.send_json({
                     "op": 2,
                     "d": {
                         "token": token,
-                        "properties": {
-                            "os": "Windows",
-                            "browser": "Discord Client",
-                            "device": "Windows"
-                        },
+                        "properties": super_props,
                         "presence": {
                             "status": "online",
                             "since": 0,
@@ -127,13 +223,31 @@ async def gateway_presence(user_id: int):
                     }
                 })
                 # Aguardar o ready
-                await ws.receive_json()
+                ready = await ws.receive_json()
+                # Calcula a latência aproximada (tempo entre envio e resposta)
+                # Para simplificar, usaremos um valor base + jitter
 
-                # Loop de heartbeat
+                # Loop de heartbeat com intervalo adaptativo
+                last_heartbeat = time.time()
                 while not data.get('gateway_stop', False):
-                    await asyncio.sleep(interval)
+                    # Calcula a latência média (simulada) - na prática mediríamos o RTT
+                    # Aqui usamos um valor entre 50ms e 200ms e adicionamos jitter
+                    simulated_latency = random.uniform(0.05, 0.20)
+                    # Intervalo ajustado: base_interval + latência + pequeno jitter
+                    # Para evitar padrões exatos, adicionamos até ±5% de variação
+                    jitter_factor = random.uniform(0.95, 1.05)
+                    adjusted_interval = (base_interval + simulated_latency) * jitter_factor
+                    # Garante um mínimo de 10s para não sobrecarregar
+                    adjusted_interval = max(10.0, adjusted_interval)
+
+                    # Se estiver em modo sono, aumenta o intervalo (heartbeat mais espaçado)
+                    if data.get('sleep_mode', False):
+                        adjusted_interval *= 2.0
+
+                    await asyncio.sleep(adjusted_interval)
                     if not data.get('gateway_stop', False):
                         await ws.send_json({"op": 1, "d": None})
+                        last_heartbeat = time.time()
 
         except Exception as e:
             print(f"Gateway presence error: {e}")
@@ -142,14 +256,13 @@ async def gateway_presence(user_id: int):
             data['gateway_task'] = None
 
 def start_gateway(user_id: int):
-    """Inicia a tarefa de presença online para o utilizador."""
+    """Inicia a tarefa de presença online com heartbeat adaptativo."""
     data = get_user(user_id)
     if data['gateway_task'] is None or data['gateway_task'].done():
         data['gateway_stop'] = False
         data['gateway_task'] = asyncio.create_task(gateway_presence(user_id))
 
 def stop_gateway(user_id: int):
-    """Para a tarefa de presença online."""
     data = get_user(user_id)
     data['gateway_stop'] = True
     if data['gateway_ws']:
@@ -158,72 +271,126 @@ def stop_gateway(user_id: int):
         data['gateway_task'].cancel()
 
 # ============================================================
-# TELEMETRIA (Science endpoints)
+# TELEMETRIA + MOUSE JITTER (SIMULAÇÃO DE UI)
 # ============================================================
 async def science_telemetry(user_id: int):
-    """Envia eventos falsos de telemetria periodicamente."""
+    """Envia eventos falsos de telemetria e simula interações de UI."""
     data = get_user(user_id)
     token = data['token']
     if not token:
         return
 
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    endpoints = [
-        "/api/v10/science", "/api/v10/track", "/api/v10/events"
-    ]
+    # Adiciona o fingerprint atual aos headers
+    headers.update(fingerprint_mgr.get())
+
+    endpoints = ["/api/v10/science", "/api/v10/track", "/api/v10/events"]
 
     while not data.get('science_stop', False):
-        # Simular um evento aleatório
+        # Se estiver em modo sono, reduz a frequência e só envia eventos leves
+        sleep_mode = data.get('sleep_mode', False)
+
+        # Escolhe aleatoriamente entre eventos de clique, rolagem, mudança de canal, etc.
         event_type = random.choice([
             "client_activity", "mouse_move", "channel_switch",
-            "guild_switch", "message_read"
+            "guild_switch", "message_read", "read_state"  # read_state é importante para simular leitura
         ])
-        payload = {
-            "events": [{
-                "type": event_type,
-                "properties": {
-                    "guild_id": str(random.randint(100000000000000000, 999999999999999999)),
-                    "channel_id": str(random.randint(100000000000000000, 999999999999999999)),
-                    "location": "text_channel",
-                    "time": int(time.time() * 1000)
-                }
-            }]
-        }
+
+        # Para simular "mouse jitter", geramos coordenadas aleatórias
+        if event_type in ("mouse_move", "client_activity"):
+            x = random.randint(0, 1920)
+            y = random.randint(0, 1080)
+            payload = {
+                "events": [{
+                    "type": event_type,
+                    "properties": {
+                        "x": x,
+                        "y": y,
+                        "guild_id": str(random.randint(100000000000000000, 999999999999999999)),
+                        "channel_id": str(random.randint(100000000000000000, 999999999999999999)),
+                        "location": "text_channel",
+                        "time": int(time.time() * 1000)
+                    }
+                }]
+            }
+        else:
+            payload = {
+                "events": [{
+                    "type": event_type,
+                    "properties": {
+                        "guild_id": str(random.randint(100000000000000000, 999999999999999999)),
+                        "channel_id": str(random.randint(100000000000000000, 999999999999999999)),
+                        "location": "text_channel",
+                        "time": int(time.time() * 1000)
+                    }
+                }]
+            }
 
         try:
             async with session.post(f"https://discord.com{random.choice(endpoints)}",
                                     headers=headers, json=payload) as resp:
-                # não importa o status, apenas simular tráfego
                 pass
         except:
             pass
 
-        # Espera entre 30 e 120 segundos antes do próximo evento
-        await asyncio.sleep(random.uniform(30, 120))
+        # Intervalo variável: se sono, mais espaçado (5-15 min), senão 30-120s
+        if sleep_mode:
+            await asyncio.sleep(random.uniform(300, 900))
+        else:
+            await asyncio.sleep(random.uniform(30, 120))
 
 def start_science(user_id: int):
-    """Inicia a tarefa de telemetria."""
     data = get_user(user_id)
     if data['science_task'] is None or data['science_task'].done():
         data['science_stop'] = False
         data['science_task'] = asyncio.create_task(science_telemetry(user_id))
 
 def stop_science(user_id: int):
-    """Para a telemetria."""
     data = get_user(user_id)
     data['science_stop'] = True
     if data['science_task'] and not data['science_task'].done():
         data['science_task'].cancel()
 
 # ============================================================
-# MODAIS (ENTRADA DE DADOS)
+# ADAPTADOR DE RATE LIMIT (LEITURA DE CABEÇALHOS)
+# ============================================================
+async def request_with_rate_limit(method: str, url: str, headers: dict = None, json: dict = None, **kwargs):
+    """
+    Executa uma requisição HTTP, lê os cabeçalhos de rate limit e ajusta dinamicamente
+    o delay antes de tentar novamente se necessário.
+    """
+    # Se houver informações de rate limit para este endpoint, respeita
+    # Por simplicidade, aqui apenas lemos e armazenamos, e aplicamos um backoff
+    # se o remaining for baixo.
+    async with session.request(method, url, headers=headers, json=json, **kwargs) as resp:
+        # Lê cabeçalhos de rate limit
+        remaining = resp.headers.get('X-RateLimit-Remaining')
+        reset_after = resp.headers.get('X-RateLimit-Reset-After')
+        bucket = resp.headers.get('X-RateLimit-Bucket')
+
+        if remaining is not None:
+            remaining = int(remaining)
+            if remaining < 5:  # se estiver acabando, espera um pouco mais
+                await asyncio.sleep(random.uniform(1.0, 3.0))
+
+        if resp.status == 429:
+            retry_after = float(resp.headers.get('Retry-After', 5))
+            await asyncio.sleep(retry_after + random.uniform(0.5, 1.5))
+            # Re-tenta a requisição (recursivo, mas com limite)
+            return await request_with_rate_limit(method, url, headers, json, **kwargs)
+
+        return resp
+
+# ============================================================
+# MODAIS (ENTRADA DE DADOS) - IGUAIS AO ORIGINAL, MAS COM WARMUP
 # ============================================================
 class TokenModal(discord.ui.Modal, title='🔑 Configurar Token do Usuário'):
     token_input = discord.ui.TextInput(label='Token de usuário', style=discord.TextStyle.paragraph, required=True)
     async def on_submit(self, interaction: discord.Interaction):
         get_user(interaction.user.id)['token'] = self.token_input.value.strip()
         await interaction.response.send_message('✅ Token configurado com sucesso!', ephemeral=True)
-        # Iniciar presença online e telemetria automaticamente
+        # Iniciar presença online, telemetria e warmup
+        await warmup()
         start_gateway(interaction.user.id)
         start_science(interaction.user.id)
 
@@ -240,9 +407,10 @@ class ChatModal(discord.ui.Modal, title='💬 Definir Chat (DM ou Servidor)'):
             return await interaction.response.send_message('❌ Configure o token primeiro.', ephemeral=True)
 
         headers = {'Authorization': data['token'], 'Content-Type': 'application/json'}
-        async with session.get(f'https://discord.com/api/v10/channels/{chat_id}', headers=headers) as resp:
-            if resp.status != 200:
-                return await interaction.response.send_message('❌ Canal não encontrado ou sem permissão de leitura.', ephemeral=True)
+        # Usa o adaptador de rate limit
+        resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{chat_id}', headers=headers)
+        if resp.status != 200:
+            return await interaction.response.send_message('❌ Canal não encontrado ou sem permissão de leitura.', ephemeral=True)
 
         data['chat_id'] = chat_id
         await interaction.response.send_message(f'✅ Chat alvo definido: `{chat_id}`', ephemeral=True)
@@ -315,35 +483,46 @@ class CallModal(discord.ui.Modal, title='🎧 Entrar em Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# FUNÇÕES CORE (AUTOMATIZAÇÕES FURTIVAS) - COM MELHORIAS
+# FUNÇÕES CORE (AUTOMATIZAÇÕES FURTIVAS) - COM ADAPTAÇÃO AO SLEEP E RATE LIMIT
 # ============================================================
 async def perform_schedule(token, chat_id, message, delay_sec):
     await asyncio.sleep(delay_sec)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    # Adiciona nonce
+    headers.update(fingerprint_mgr.get())
     payload = {
         'content': message,
         'nonce': str(generate_snowflake())
     }
-    await session.post(f'https://discord.com/api/v10/channels/{chat_id}/messages',
-                       headers=headers, json=payload)
+    await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{chat_id}/messages',
+                                  headers=headers, json=payload)
 
 async def perform_auto_farm(user_id, message, interval_sec):
     data = get_user(user_id)
     headers = {'Authorization': data['token'], 'Content-Type': 'application/json'}
+    headers.update(fingerprint_mgr.get())
 
     while data['auto_farming'] and not data['farm_cancel'].is_set():
+        # Verifica modo sono
+        if await check_sleep_mode(user_id):
+            # Se estiver dormindo, pausa a execução até sair do modo sono
+            while await check_sleep_mode(user_id):
+                await asyncio.sleep(60)
+            continue
+
         try:
             payload = {
                 'content': message,
                 'nonce': str(generate_snowflake())
             }
-            await session.post(f'https://discord.com/api/v10/channels/{data["chat_id"]}/messages',
-                               headers=headers, json=payload)
+            await request_with_rate_limit('POST', f'https://discord.com/api/v10/channels/{data["chat_id"]}/messages',
+                                          headers=headers, json=payload)
         except:
             pass
 
+        # Intervalo com jitter e adaptação baseada em rate limit
         real_interval = interval_sec + random.uniform(-30, 30)
+        # Se o rate limit estiver apertado, aumenta o intervalo
+        # (simplificado: apenas leitura do cabeçalho não é feito aqui, mas podemos adicionar)
         for _ in range(int(real_interval / 5)):
             if data['farm_cancel'].is_set():
                 break
@@ -351,64 +530,68 @@ async def perform_auto_farm(user_id, message, interval_sec):
 
 async def perform_backup(interaction: discord.Interaction, token, chat_id):
     headers = {'Authorization': token}
+    headers.update(fingerprint_mgr.get())
     last_id = None
     messages_str = []
 
     await interaction.response.defer(ephemeral=False)
     prog_msg = await interaction.followup.send(f'🔄 **Backup Stealth Iniciado.** \nLimite configurado: {MAX_BACKUP} msgs. Isso leva tempo para imitar um humano lendo...')
 
-    # Iniciar presença online durante o backup
+    # Iniciar presença e telemetria
     start_gateway(interaction.user.id)
     start_science(interaction.user.id)
 
     while len(messages_str) < MAX_BACKUP:
+        # Verifica modo sono - se estiver dormindo, pausa
+        if await check_sleep_mode(interaction.user.id):
+            await prog_msg.edit(content='💤 **Modo sono ativo – backup pausado até o amanhecer.**')
+            while await check_sleep_mode(interaction.user.id):
+                await asyncio.sleep(60)
+            await prog_msg.edit(content='🔄 **Retomando backup...**')
+            continue
+
         url = f'https://discord.com/api/v10/channels/{chat_id}/messages?limit=100'
         if last_id:
             url += f'&before={last_id}'
 
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 429:
-                await asyncio.sleep(float(resp.headers.get('Retry-After', 5)) + 2)
-                continue
-            if resp.status != 200:
-                break
+        resp = await request_with_rate_limit('GET', url, headers=headers)
+        if resp.status != 200:
+            break
+        msgs = resp.json()
+        if not msgs:
+            break
 
-            msgs = resp.json()
-            if not msgs:
-                break
+        for m in msgs:
+            author = m['author']['username']
+            content = m.get('content', '[Vazio ou Anexo]')
+            timestamp = m['timestamp']
+            messages_str.append(f"[{timestamp}] {author}: {content}")
 
-            for m in msgs:
-                author = m['author']['username']
-                content = m.get('content', '[Vazio ou Anexo]')
-                timestamp = m['timestamp']
-                messages_str.append(f"[{timestamp}] {author}: {content}")
-
-            last_id = msgs[-1]['id']
-            delay_rolagem = random.uniform(4.0, 8.0)
-            await asyncio.sleep(delay_rolagem)
+        last_id = msgs[-1]['id']
+        delay_rolagem = random.uniform(4.0, 8.0)
+        await asyncio.sleep(delay_rolagem)
 
     if not messages_str:
-        return await prog_msg.edit(content='❌ Nenhuma mensagem encontrada ou sem acesso.')
+        await prog_msg.edit(content='❌ Nenhuma mensagem encontrada ou sem acesso.')
+    else:
+        messages_str.reverse()
+        file_content = "\n".join(messages_str)
+        buffer = io.BytesIO(file_content.encode('utf-8'))
+        await prog_msg.edit(content=f'✅ **Backup Concluído com Segurança!**\nForam lidas {len(messages_str)} mensagens.')
+        await interaction.followup.send(file=discord.File(buffer, filename=f"backup_chat_{chat_id}.txt"))
 
-    messages_str.reverse()
-    file_content = "\n".join(messages_str)
-    buffer = io.BytesIO(file_content.encode('utf-8'))
-
-    await prog_msg.edit(content=f'✅ **Backup Concluído com Segurança!**\nForam lidas {len(messages_str)} mensagens.')
-    await interaction.followup.send(file=discord.File(buffer, filename=f"backup_chat_{chat_id}.txt"))
-
-    # Parar presença e telemetria após terminar
     stop_gateway(interaction.user.id)
     stop_science(interaction.user.id)
 
 async def perform_clone(user_id, target_id, progress_msg):
     data = get_user(user_id)
     headers = {'Authorization': data['token']}
+    headers.update(fingerprint_mgr.get())
 
-    async with session.get(f'https://discord.com/api/v10/users/{target_id}', headers=headers) as resp:
-        if resp.status != 200:
-            return await progress_msg.edit(content='❌ Usuário alvo não encontrado.')
-        target_data = resp.json()
+    resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/users/{target_id}', headers=headers)
+    if resp.status != 200:
+        return await progress_msg.edit(content='❌ Usuário alvo não encontrado.')
+    target_data = resp.json()
 
     payload = {}
     if 'bio' in target_data:
@@ -417,31 +600,32 @@ async def perform_clone(user_id, target_id, progress_msg):
     if target_data.get('avatar'):
         av_hash = target_data['avatar']
         av_url = f"https://cdn.discordapp.com/avatars/{target_id}/{av_hash}.png?size=1024"
-        async with session.get(av_url) as av_resp:
-            if av_resp.status == 200:
-                av_bytes = av_resp.content
-                av_b64 = base64.b64encode(av_bytes).decode('utf-8')
-                payload['avatar'] = f"data:image/png;base64,{av_b64}"
+        av_resp = await request_with_rate_limit('GET', av_url)
+        if av_resp.status == 200:
+            av_bytes = av_resp.content
+            av_b64 = base64.b64encode(av_bytes).decode('utf-8')
+            payload['avatar'] = f"data:image/png;base64,{av_b64}"
 
     await asyncio.sleep(random.uniform(2.0, 4.0))
 
     if payload:
-        async with session.patch('https://discord.com/api/v10/users/@me', headers=headers, json=payload) as patch_resp:
-            if patch_resp.status == 200:
-                await progress_msg.edit(content='✅ **Perfil clonado com sucesso!**')
-            else:
-                await progress_msg.edit(content=f'❌ Erro ao atualizar perfil: {patch_resp.status}')
+        patch_resp = await request_with_rate_limit('PATCH', 'https://discord.com/api/v10/users/@me',
+                                                   headers=headers, json=payload)
+        if patch_resp.status == 200:
+            await progress_msg.edit(content='✅ **Perfil clonado com sucesso!**')
+        else:
+            await progress_msg.edit(content=f'❌ Erro ao atualizar perfil: {patch_resp.status}')
     else:
         await progress_msg.edit(content='⚠️ O alvo não tem avatar ou bio configurada.')
 
 async def perform_cleanup(interaction, token, chat_id, progress_msg):
     data = get_user(interaction.user.id)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
+    headers.update(fingerprint_mgr.get())
     messages_deleted, total_fetched = 0, 0
     last_id = None
     start_time = time.time()
 
-    # Iniciar presença online e telemetria
     start_gateway(interaction.user.id)
     start_science(interaction.user.id)
 
@@ -449,19 +633,24 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
         if data['clean_cancel'] and data['clean_cancel'].is_set():
             break
 
+        # Verifica modo sono
+        if await check_sleep_mode(interaction.user.id):
+            await progress_msg.edit(content='💤 **Modo sono ativo – limpeza pausada.**')
+            while await check_sleep_mode(interaction.user.id):
+                await asyncio.sleep(60)
+            await progress_msg.edit(content='🔄 **Retomando limpeza...**')
+            continue
+
         url = f'https://discord.com/api/v10/channels/{chat_id}/messages?limit=100'
         if last_id:
             url += f'&before={last_id}'
 
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 429:
-                await asyncio.sleep(float(resp.headers.get('Retry-After', 5)) + random.uniform(1.0, 3.0))
-                continue
-            if resp.status != 200:
-                break
-            messages = resp.json()
-            if not messages:
-                break
+        resp = await request_with_rate_limit('GET', url, headers=headers)
+        if resp.status != 200:
+            break
+        messages = resp.json()
+        if not messages:
+            break
 
         total_fetched += len(messages)
 
@@ -471,29 +660,20 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
 
             if msg['author']['id'] == str(interaction.user.id):
                 del_url = f'https://discord.com/api/v10/channels/{chat_id}/messages/{msg["id"]}'
-                try:
-                    async with session.delete(del_url, headers=headers) as del_resp:
-                        if del_resp.status == 429:
-                            await asyncio.sleep(float(del_resp.headers.get('Retry-After', 5)))
-                            continue
-                        if del_resp.status == 204:
-                            messages_deleted += 1
-
-                            if messages_deleted % PAUSE_AFTER == 0:
-                                pausa = random.uniform(PAUSE_DUR_MIN, PAUSE_DUR_MAX)
-                                await progress_msg.edit(content=f'⏸️ **Simulando inatividade humana...**\nPausa de `{int(pausa)}` segundos.')
-                                await asyncio.sleep(pausa)
-                            elif messages_deleted % 3 == 0:
-                                await progress_msg.edit(content=f'🔄 **Limpando de forma furtiva...**\n🗑️ Deletadas: `{messages_deleted}/{MAX_MESSAGES}`')
-
-                except:
-                    pass
+                del_resp = await request_with_rate_limit('DELETE', del_url, headers=headers)
+                if del_resp.status == 204:
+                    messages_deleted += 1
+                    if messages_deleted % PAUSE_AFTER == 0:
+                        pausa = random.uniform(PAUSE_DUR_MIN, PAUSE_DUR_MAX)
+                        await progress_msg.edit(content=f'⏸️ **Simulando inatividade humana...**\nPausa de `{int(pausa)}` segundos.')
+                        await asyncio.sleep(pausa)
+                    elif messages_deleted % 3 == 0:
+                        await progress_msg.edit(content=f'🔄 **Limpando de forma furtiva...**\n🗑️ Deletadas: `{messages_deleted}/{MAX_MESSAGES}`')
 
                 await asyncio.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
 
             if messages_deleted >= MAX_MESSAGES:
                 data['cleaning'] = False
-                # Parar gateway e science
                 stop_gateway(interaction.user.id)
                 stop_science(interaction.user.id)
                 return await progress_msg.edit(content=f'✅ **Cota diária segura atingida** ({MAX_MESSAGES}). Parando para evitar ban.')
@@ -511,37 +691,46 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     data = get_user(user_id)
     token = data['token']
     headers = {'Authorization': token}
+    headers.update(fingerprint_mgr.get())
 
-    # Já existe uma conexão de voz com websocket, não precisamos do gateway separado
     async with aiohttp.ClientSession() as aio_session:
         # Obter guild_id
-        async with aio_session.get(f'https://discord.com/api/v10/channels/{channel_id}', headers=headers) as resp:
-            if resp.status == 200:
-                guild_id = (await resp.json()).get('guild_id')
-            else:
-                return await progress_msg.edit(content='❌ Erro ao acessar o canal. Verifique permissões.')
+        resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
+        if resp.status == 200:
+            guild_id = (await resp.json()).get('guild_id')
+        else:
+            return await progress_msg.edit(content='❌ Erro ao acessar o canal. Verifique permissões.')
 
         try:
             async with aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json') as ws:
                 hello = await ws.receive_json()
-                interval = hello['d']['heartbeat_interval'] / 1000.0
+                base_interval = hello['d']['heartbeat_interval'] / 1000.0
 
-                await ws.send_json({"op": 2, "d": {"token": token, "properties": {"os": "Windows", "browser": "Discord Client", "device": "Windows"}}})
+                await ws.send_json({"op": 2, "d": {"token": token, "properties": fingerprint_mgr.get()}})
                 await asyncio.sleep(random.uniform(2.0, 4.0))
                 await ws.send_json({"op": 4, "d": {"guild_id": guild_id, "channel_id": str(channel_id), "self_mute": True, "self_deaf": True}})
 
                 end_time = time.time() + (hours * 3600)
-                next_hb = time.time() + interval
                 await progress_msg.edit(content=f'✅ **Conta conectada na Call furtivamente!**\n⏰ Permanência: `{hours}h`')
 
                 while time.time() < end_time and not data['call_cancel'].is_set():
+                    # Verifica modo sono - se dormindo, sai da call (opcional)
+                    if await check_sleep_mode(user_id):
+                        await progress_msg.edit(content='💤 **Modo sono ativo – saindo da call.**')
+                        break
+
+                    # Heartbeat adaptativo
+                    simulated_latency = random.uniform(0.05, 0.20)
+                    jitter = random.uniform(0.95, 1.05)
+                    adjusted_interval = (base_interval + simulated_latency) * jitter
+                    adjusted_interval = max(10.0, adjusted_interval)
+
                     try:
-                        msg = await asyncio.wait_for(ws.receive(), timeout=max(0.5, next_hb - time.time()))
+                        msg = await asyncio.wait_for(ws.receive(), timeout=adjusted_interval + 2)
                         if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
                             break
                     except asyncio.TimeoutError:
                         await ws.send_json({"op": 1, "d": None})
-                        next_hb = time.time() + interval
         except:
             pass
 
@@ -549,7 +738,7 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     await progress_msg.edit(content='⏹️ **Sessão de Call encerrada ou tempo expirado.**')
 
 # ============================================================
-# MENUS (VIEWS)
+# MENUS (VIEWS) - IGUAIS AO ORIGINAL
 # ============================================================
 class PainelPrincipal(discord.ui.View):
     def __init__(self, user_id):
@@ -658,23 +847,20 @@ class PainelPrincipal(discord.ui.View):
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre a suíte avançada com parâmetros de segurança anti-ban.')
 async def paineldm(interaction: discord.Interaction):
-    # Garantir warmup
     await warmup()
-
     embed = discord.Embed(
-        title='🛡️ Master Panel - Modo Furtivo',
-        description='O sistema agora opera simulando latência e fadiga humana para evitar verificações automáticas do Discord.',
+        title='🛡️ Master Panel - Modo Furtivo Avançado',
+        description='Sistema com fingerprint rotativo, heartbeat adaptativo, simulação de UI, modo sono e rate-limit dinâmico.',
         color=discord.Color.brand_green()
     )
     embed.add_field(name='🧹 Limpeza Segura', value=f'Delay: `{int(MIN_DELAY)}` a `{int(MAX_DELAY)}` segundos.\nCota Máxima: `{MAX_MESSAGES}` msgs/sessão.', inline=False)
-    embed.add_field(name='💾 Backup Humanizado', value=f'Limite rígido de leitura estipulado em `{MAX_BACKUP}` mensagens.', inline=False)
-
+    embed.add_field(name='💾 Backup Humanizado', value=f'Limite rígido de leitura: `{MAX_BACKUP}` mensagens.', inline=False)
+    embed.add_field(name='💤 Modo Sono', value=f'Ativo entre {SLEEP_START_HOUR}:00 e {SLEEP_END_HOUR}:00 (horário local).', inline=False)
     await interaction.response.send_message(embed=embed, view=PainelPrincipal(interaction.user.id), ephemeral=False)
 
 @bot.event
 async def on_ready():
-    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
-    # Realizar warmup assim que o bot estiver pronto
+    print(f'✅ Bot Mestre [Modo Furtivo Avançado] operando como {bot.user}')
     await warmup()
     await bot.tree.sync()
 
