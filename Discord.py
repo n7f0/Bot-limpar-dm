@@ -55,7 +55,7 @@ SLEEP_START_HOUR = 23
 SLEEP_END_HOUR = 7
 POST_TASK_REST_MIN = 5
 POST_TASK_REST_MAX = 15
-HEALTH_CHECK_INTERVAL = 300  # 5 minutos
+HEALTH_CHECK_INTERVAL = 300
 
 # ============================================================
 # BANCO DE DADOS (POSTGRESQL OU SQLITE)
@@ -229,7 +229,7 @@ def exponential_random(mean: float, min_val: float = 0, max_val: float = float('
     return max(min_val, min(val, max_val))
 
 # ============================================================
-# GERENCIADOR DE FINGERPRINT (ROTAÇÃO AUTOMÁTICA)
+# GERENCIADOR DE FINGERPRINT
 # ============================================================
 class FingerprintManager:
     CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
@@ -299,7 +299,7 @@ class FingerprintManager:
 fingerprint_mgr = FingerprintManager()
 
 # ============================================================
-# SESSÃO CURL_CFFI + HEADERS REALISTAS
+# SESSÃO CURL_CFFI + HEADERS
 # ============================================================
 def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) -> dict:
     fp = fingerprint_mgr.get(vary=vary_fingerprint)
@@ -332,7 +332,7 @@ def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) ->
 session = AsyncSession(impersonate="chrome120")
 
 # ============================================================
-# WARMUP AVANÇADO
+# WARMUP
 # ============================================================
 warmup_done = False
 
@@ -545,7 +545,7 @@ async def request_with_rate_limit(method: str, url: str, headers: dict = None, j
     return resp
 
 # ============================================================
-# SIMULAÇÕES (DIGITAÇÃO, ACK, REAÇÕES)
+# SIMULAÇÕES
 # ============================================================
 async def simulate_typing(channel_id: int, token: str, duration: float = None):
     if duration is None:
@@ -579,7 +579,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP) – CORRIGIDO
+# GERENCIADOR DE VOZ (UDP/RTP)
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -597,7 +597,7 @@ class VoiceConnection:
         try:
             ready_msg = await self.ws.receive()
             data = json.loads(ready_msg.data)
-            if data.get('op') == 2:  # READY
+            if data.get('op') == 2:
                 ip = data['d']['ip']
                 port = data['d']['port']
                 self.ssrc = data['d']['ssrc']
@@ -1074,9 +1074,6 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     await progress_msg.edit(content=f'✅ **Limpeza finalizada.** Deletadas: {messages_deleted}. Tempo: {int(time.time()-start_time)}s.')
     await post_task_rest(interaction.user.id)
 
-# ============================================================
-# PERFORM VOICE FARM – CORRIGIDO
-# ============================================================
 async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     data = get_user(user_id)
     token = data['token']
@@ -1085,7 +1082,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     headers = build_headers({"Authorization": token})
 
     async with aiohttp.ClientSession() as aio_session:
-        # 1. Obter informações do canal de voz
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
         if resp.status_code != 200:
             return await progress_msg.edit(content=f'❌ Erro ao acessar o canal (status {resp.status_code}).')
@@ -1094,12 +1090,10 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
         if not guild_id:
             return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
-        # 2. Conectar ao WebSocket de voz
         voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
         hello = await voice_ws.receive_json()
         base_interval = hello['d']['heartbeat_interval'] / 1000.0
 
-        # 3. Enviar Identify
         await voice_ws.send_json({
             "op": 2,
             "d": {
@@ -1107,9 +1101,8 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
                 "properties": fingerprint_mgr.get(vary=False)
             }
         })
-        await voice_ws.receive_json()  # Ready
+        await voice_ws.receive_json()
 
-        # 4. Conectar ao canal de voz
         await voice_ws.send_json({
             "op": 4,
             "d": {
@@ -1120,7 +1113,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
             }
         })
 
-        # 5. Iniciar conexão UDP
         voice = VoiceConnection(user_id, voice_ws, token)
         if not await voice.start():
             await voice_ws.close()
@@ -1133,7 +1125,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
         last_heartbeat = time.time()
         last_log = time.time()
 
-        # 6. Loop principal
         while time.time() < end_time and not data['call_cancel'].is_set():
             if await check_sleep_mode(user_id):
                 print(f"💤 Modo sono ativado – saindo da call para {user_id}")
@@ -1166,7 +1157,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
 
             await asyncio.sleep(1.0)
 
-        # 7. Limpeza
         voice.stop()
         try:
             await voice_ws.close()
@@ -1549,7 +1539,54 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# COMANDO PRINCIPAL (QUALQUER PESSOA PODE USAR)
+# RICH PRESENCE PERSONALIZADO
+# ============================================================
+async def update_presence():
+    """Atualiza a presença do bot com Rich Presence personalizado."""
+    while True:
+        try:
+            # Calcula o tempo de atividade do bot
+            uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
+            hours = uptime // 3600
+            minutes = (uptime % 3600) // 60
+
+            # Cria a atividade com Rich Presence
+            activity = discord.Activity(
+                type=discord.ActivityType.playing,
+                name="Nexzy Clear DM",  # Nome que aparece como "Jogando"
+                details=f"🧹 {len(user_data)} usuários ativos",  # Linha de detalhes
+                state=f"⏱️ {hours}h {minutes}m online",  # Estado
+                assets={
+                    "large_image": "logo",  # Nome da imagem grande (configurada no Developer Portal)
+                    "large_text": "Nexzy Clear DM",  # Texto ao passar o rato
+                    "small_image": "icon",  # Nome da imagem pequena
+                    "small_text": "v2.0"  # Texto ao passar o rato na imagem pequena
+                },
+                # Botões de convite (opcional)
+                buttons=[
+                    {"label": "📊 Painel", "url": "https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=0"}
+                ]
+            )
+
+            await bot.change_presence(activity=activity, status=discord.Status.online)
+        except Exception as e:
+            print(f"⚠️ Erro ao atualizar presença: {e}")
+
+        # Atualiza a cada 30 segundos (para mostrar tempo online atualizado)
+        await asyncio.sleep(30)
+
+@bot.event
+async def on_ready():
+    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
+    # Marca o tempo de início para calcular uptime
+    bot.start_time = time.time()
+    await warmup()
+    await bot.tree.sync()
+    # Inicia a tarefa de atualização da presença
+    bot.loop.create_task(update_presence())
+
+# ============================================================
+# COMANDO PRINCIPAL
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
@@ -1568,12 +1605,6 @@ async def paineldm(interaction: discord.Interaction):
     embed.set_footer(text='Todas as ações simulam comportamento humano com segurança máxima.')
     view = CategoryView(interaction.user.id, "config")
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
-
-@bot.event
-async def on_ready():
-    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
-    await warmup()
-    await bot.tree.sync()
 
 if __name__ == "__main__":
     bot.run(TOKEN_BOT)
