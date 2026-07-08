@@ -229,7 +229,7 @@ def exponential_random(mean: float, min_val: float = 0, max_val: float = float('
     return max(min_val, min(val, max_val))
 
 # ============================================================
-# GERENCIADOR DE FINGERPRINT
+# GERENCIADOR DE FINGERPRINT (ROTAÇÃO AUTOMÁTICA)
 # ============================================================
 class FingerprintManager:
     CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
@@ -299,7 +299,7 @@ class FingerprintManager:
 fingerprint_mgr = FingerprintManager()
 
 # ============================================================
-# SESSÃO CURL_CFFI + HEADERS
+# SESSÃO CURL_CFFI + HEADERS REALISTAS
 # ============================================================
 def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) -> dict:
     fp = fingerprint_mgr.get(vary=vary_fingerprint)
@@ -332,7 +332,7 @@ def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) ->
 session = AsyncSession(impersonate="chrome120")
 
 # ============================================================
-# WARMUP
+# WARMUP AVANÇADO
 # ============================================================
 warmup_done = False
 
@@ -545,7 +545,7 @@ async def request_with_rate_limit(method: str, url: str, headers: dict = None, j
     return resp
 
 # ============================================================
-# SIMULAÇÕES
+# SIMULAÇÕES (DIGITAÇÃO, ACK, REAÇÕES)
 # ============================================================
 async def simulate_typing(channel_id: int, token: str, duration: float = None):
     if duration is None:
@@ -579,7 +579,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP)
+# GERENCIADOR DE VOZ (UDP/RTP) – CORRIGIDO
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -1539,54 +1539,40 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# RICH PRESENCE PERSONALIZADO
+# RICH PRESENCE PERSONALIZADO (COM IMAGEM CORRETA)
 # ============================================================
 async def update_presence():
-    """Atualiza a presença do bot com Rich Presence personalizado."""
     while True:
         try:
-            # Calcula o tempo de atividade do bot
             uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
             hours = uptime // 3600
             minutes = (uptime % 3600) // 60
 
-            # Cria a atividade com Rich Presence
             activity = discord.Activity(
                 type=discord.ActivityType.playing,
-                name="Nexzy Clear DM",  # Nome que aparece como "Jogando"
-                details=f"🧹 {len(user_data)} usuários ativos",  # Linha de detalhes
-                state=f"⏱️ {hours}h {minutes}m online",  # Estado
+                name="Nexzy Clear DM",
+                details=f"🧹 {len(user_data)} usuários ativos",
+                state=f"⏱️ {hours}h {minutes}m online",
                 assets={
-                    "large_image": "logo",  # Nome da imagem grande (configurada no Developer Portal)
-                    "large_text": "Nexzy Clear DM",  # Texto ao passar o rato
-                    "small_image": "icon",  # Nome da imagem pequena
-                    "small_text": "v2.0"  # Texto ao passar o rato na imagem pequena
+                    "large_image": "27146",      # ← Nome da imagem no portal
+                    "large_text": "Nexzy Clear DM",
+                    "small_image": "27146",      # ← Podes usar a mesma ou outra
+                    "small_text": "v2.0"
                 },
-                # Botões de convite (opcional)
-                buttons=[
-                    {"label": "📊 Painel", "url": "https://discord.com/oauth2/authorize?client_id=YOUR_CLIENT_ID&scope=bot&permissions=0"}
-                ]
+                # Botões (opcional – remove se a app não for verificada)
+                # buttons=[
+                #     {"label": "📊 Painel", "url": "https://discord.com/oauth2/authorize?client_id=SEU_CLIENT_ID&scope=bot&permissions=0"}
+                # ]
             )
 
             await bot.change_presence(activity=activity, status=discord.Status.online)
         except Exception as e:
             print(f"⚠️ Erro ao atualizar presença: {e}")
 
-        # Atualiza a cada 30 segundos (para mostrar tempo online atualizado)
         await asyncio.sleep(30)
 
-@bot.event
-async def on_ready():
-    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
-    # Marca o tempo de início para calcular uptime
-    bot.start_time = time.time()
-    await warmup()
-    await bot.tree.sync()
-    # Inicia a tarefa de atualização da presença
-    bot.loop.create_task(update_presence())
-
 # ============================================================
-# COMANDO PRINCIPAL
+# COMANDO PRINCIPAL (SEM RESTRIÇÃO DE CARGO)
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
@@ -1606,5 +1592,20 @@ async def paineldm(interaction: discord.Interaction):
     view = CategoryView(interaction.user.id, "config")
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
+# ============================================================
+# EVENTO ON_READY (INICIA A PRESENÇA)
+# ============================================================
+@bot.event
+async def on_ready():
+    print(f'✅ Bot Mestre [Modo Furtivo] operando como {bot.user}')
+    bot.start_time = time.time()
+    await warmup()
+    await bot.tree.sync()
+    # Inicia a atualização da presença
+    bot.loop.create_task(update_presence())
+
+# ============================================================
+# MAIN
+# ============================================================
 if __name__ == "__main__":
     bot.run(TOKEN_BOT)
