@@ -1539,7 +1539,7 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# RICH PRESENCE PERSONALIZADO (COM IMAGEM CORRETA)
+# RICH PRESENCE PERSONALIZADO (COM A CHAVE CORRETA: nexzy_store)
 # ============================================================
 async def update_presence():
     while True:
@@ -1548,21 +1548,18 @@ async def update_presence():
             hours = uptime // 3600
             minutes = (uptime % 3600) // 60
 
+            # A chave correta é "nexzy_store" (tudo minúsculo)
             activity = discord.Activity(
                 type=discord.ActivityType.playing,
                 name="Nexzy Clear DM",
                 details=f"🧹 {len(user_data)} usuários ativos",
                 state=f"⏱️ {hours}h {minutes}m online",
                 assets={
-                    "large_image": "27146",      # ← Nome da imagem no portal
+                    "large_image": "nexzy_store",   # ← CHAVE CORRETA (minúscula)
                     "large_text": "Nexzy Clear DM",
-                    "small_image": "27146",      # ← Podes usar a mesma ou outra
+                    "small_image": "nexzy_store",   # ← mesma imagem ou outra
                     "small_text": "v2.0"
-                },
-                # Botões (opcional – remove se a app não for verificada)
-                # buttons=[
-                #     {"label": "📊 Painel", "url": "https://discord.com/oauth2/authorize?client_id=SEU_CLIENT_ID&scope=bot&permissions=0"}
-                # ]
+                }
             )
 
             await bot.change_presence(activity=activity, status=discord.Status.online)
