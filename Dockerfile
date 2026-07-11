@@ -1,15 +1,7 @@
-FROM python:3.10-slim
-
+FROM python:3.11-slim
+RUN apt-get update && apt-get install -y gcc python3-dev libcurl4-openssl-dev libssl-dev && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
-
-# Instala dependências do sistema (para cloudscraper e outras)
-RUN apt-get update && apt-get install -y \
-    gcc \
-    && rm -rf /var/lib/apt/lists/*
-
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-
-COPY Discord.py .
-
-CMD ["python", "Discord.py"]
+COPY . .
+CMD ["python", "main.py"]
