@@ -2,12 +2,12 @@ version: '3.8'
 services:
   bot:
     build: .
-    container_name: master-bot-furtivo
+    container_name: bot-limpar-dm-bot
     restart: always
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-    # O bot cria o arquivo config.db internamente, este volume garante que ele não suma
     volumes:
-      - ./data:/app
+      - data:/app
+
 volumes:
   data:
