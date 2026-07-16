@@ -580,7 +580,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP)
+# GERENCIADOR DE VOZ (UDP/RTP) - PROTOCOLO ATUALIZADO
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -606,16 +606,24 @@ class VoiceConnection:
                 mode = modes[0] if modes else 'xsalsa20_poly1305'
 
                 self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                # Correção: Tempo de limite aumentado para evitar desconexões UDP no Docker
                 self.udp_socket.settimeout(10.0)
 
+                # --- NOVO PROTOCOLO DE DESCOBERTA DE IP DO DISCORD ---
                 packet = bytearray(74)
-                struct.pack_into('>I', packet, 0, self.ssrc)
+                struct.pack_into('>H', packet, 0, 1)      # Tipo 1 (Request)
+                struct.pack_into('>H', packet, 2, 70)     # Tamanho (70 bytes após o cabeçalho)
+                struct.pack_into('>I', packet, 4, self.ssrc) # SSRC
+                
                 self.udp_socket.sendto(packet, (ip, port))
 
+                # Recebe a resposta do Discord
                 resp, _ = self.udp_socket.recvfrom(74)
-                external_ip = resp[8:].decode().split('\x00', 1)[0]
-                external_port = struct.unpack('>H', resp[4:6])[0]
+                
+                # O IP vem como uma string entre o byte 8 e 72
+                external_ip = resp[8:72].decode('utf-8').strip('\x00')
+                # A porta agora vem empacotada no final exato do pacote (bytes 72 a 74)
+                external_port = struct.unpack_from('>H', resp, 72)[0]
+                # -----------------------------------------------------
 
                 await self.ws.send(json.dumps({
                     "op": 1,
