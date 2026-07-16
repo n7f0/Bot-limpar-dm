@@ -579,7 +579,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP) – CORRIGIDO
+# GERENCIADOR DE VOZ (UDP/RTP)
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -1539,32 +1539,34 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# RICH PRESENCE PERSONALIZADO (COM A CHAVE CORRETA: nexzy_store)
+# RICH PRESENCE PERSONALIZADO (COM A CHAVE CORRETA E MANUTENÇÃO DE ESTADO)
 # ============================================================
 async def update_presence():
     while True:
         try:
-            uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
-            hours = uptime // 3600
-            minutes = (uptime % 3600) // 60
+            if bot.is_ready():
+                uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
+                hours = uptime // 3600
+                minutes = (uptime % 3600) // 60
 
-            # A chave correta é "nexzy_store" (tudo minúsculo)
-            activity = discord.Activity(
-                type=discord.ActivityType.playing,
-                name="Nexzy Clear DM",
-                details=f"🧹 {len(user_data)} usuários ativos",
-                state=f"⏱️ {hours}h {minutes}m online",
-                assets={
-                    "large_image": "nexzy_store",   # ← CHAVE CORRETA (minúscula)
-                    "large_text": "Nexzy Clear DM",
-                    "small_image": "nexzy_store",   # ← mesma imagem ou outra
-                    "small_text": "v2.0"
-                }
-            )
+                activity = discord.Activity(
+                    type=discord.ActivityType.playing,
+                    name="Nexzy Clear DM",
+                    details=f"🧹 {len(user_data)} usuários ativos",
+                    state=f"⏱️ {hours}h {minutes}m online",
+                    assets={
+                        "large_image": "nexzy_store",
+                        "large_text": "Nexzy Clear DM",
+                        "small_image": "nexzy_store",
+                        "small_text": "v2.0"
+                    }
+                )
 
-            await bot.change_presence(activity=activity, status=discord.Status.online)
+                await bot.change_presence(activity=activity, status=discord.Status.online)
+            else:
+                await asyncio.sleep(10)
         except Exception as e:
-            print(f"⚠️ Erro ao atualizar presença: {e}")
+            print(f"⚠️ Aviso ao atualizar presença: {e}")
 
         await asyncio.sleep(30)
 
@@ -1598,7 +1600,6 @@ async def on_ready():
     bot.start_time = time.time()
     await warmup()
     await bot.tree.sync()
-    # Inicia a atualização da presença
     bot.loop.create_task(update_presence())
 
 # ============================================================
