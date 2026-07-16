@@ -39,6 +39,7 @@ if not TOKEN_BOT:
 
 intents = discord.Intents.default()
 intents.members = True
+intents.message_content = True  # Correção: Intent privilegiado ativado
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
@@ -605,7 +606,8 @@ class VoiceConnection:
                 mode = modes[0] if modes else 'xsalsa20_poly1305'
 
                 self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                self.udp_socket.settimeout(2.0)
+                # Correção: Tempo de limite aumentado para evitar desconexões UDP no Docker
+                self.udp_socket.settimeout(10.0)
 
                 packet = bytearray(74)
                 struct.pack_into('>I', packet, 0, self.ssrc)
@@ -1544,6 +1546,7 @@ class VoiceButtonStop(discord.ui.Button):
 async def update_presence():
     while True:
         try:
+            # Correção: Verificação de status online antes de alterar a presença
             if bot.is_ready():
                 uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
                 hours = uptime // 3600
