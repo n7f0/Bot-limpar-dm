@@ -10,8 +10,4 @@ services:
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-    volumes:
-      - bot_data:/app/data   # APENAS dados, não o código
-
-volumes:
-  bot_data:
+    # NENHUM VOLUME MONTANDO /app
