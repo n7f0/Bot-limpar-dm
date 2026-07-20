@@ -580,7 +580,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP) - CORRIGIDO
+# GERENCIADOR DE VOZ (UDP/RTP) - CORRIGIDO COM TIMEOUT E FALLBACK
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -598,60 +598,81 @@ class VoiceConnection:
 
     async def start(self):
         try:
-            ready_msg = await self.ws.receive()
-            data = json.loads(ready_msg.data)
-            if data.get('op') == 2:
-                ip = data['d']['ip']
-                port = data['d']['port']
-                self.ssrc = data['d']['ssrc']
-                modes = data['d']['modes']
-                mode = modes[0] if modes else 'xsalsa20_poly1305'
+            # Aguarda o evento op:2 (Ready) do voice WS
+            print(f"[Voice] Aguardando op:2 para {self.user_id}")
+            while True:
+                msg = await self.ws.receive()
+                if msg.type != aiohttp.WSMsgType.TEXT:
+                    continue
+                data = json.loads(msg.data)
+                if data.get('op') == 2:
+                    print(f"[Voice] Recebido op:2")
+                    break
+                else:
+                    print(f"[Voice] Ignorando op {data.get('op')}")
 
-                self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-                self.udp_socket.settimeout(10.0)
+            ip = data['d']['ip']
+            port = data['d']['port']
+            self.ssrc = data['d']['ssrc']
+            modes = data['d']['modes']
+            mode = modes[0] if modes else 'xsalsa20_poly1305'
 
-                packet = bytearray(74)
-                struct.pack_into('>H', packet, 0, 1)
-                struct.pack_into('>H', packet, 2, 70)
-                struct.pack_into('>I', packet, 4, self.ssrc)
+            print(f"[Voice] IP: {ip}, Port: {port}, SSRC: {self.ssrc}")
 
-                def udp_discovery():
-                    self.udp_socket.sendto(packet, (ip, port))
-                    resp, _ = self.udp_socket.recvfrom(74)
-                    return resp
+            # Cria socket UDP com timeout
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.settimeout(5.0)
 
-                resp = await asyncio.to_thread(udp_discovery)
+            # Pacote de descoberta
+            packet = bytearray(74)
+            struct.pack_into('>H', packet, 0, 1)
+            struct.pack_into('>H', packet, 2, 70)
+            struct.pack_into('>I', packet, 4, self.ssrc)
 
-                external_ip = resp[8:72].decode('utf-8').strip('\x00')
-                external_port = struct.unpack_from('>H', resp, 72)[0]
+            print(f"[Voice] Enviando pacote UDP para {ip}:{port}")
+            self.udp_socket.sendto(packet, (ip, port))
 
-                self.voice_ip = external_ip
-                self.voice_port = external_port
-
-                await self.ws.send(json.dumps({
-                    "op": 1,
-                    "d": {
-                        "protocol": "udp",
-                        "data": {
-                            "address": external_ip,
-                            "port": external_port,
-                            "mode": mode
-                        }
-                    }
-                }))
-
-                self.is_running = True
-                self.udp_task = asyncio.create_task(self._udp_heartbeat())
-                print(f"✅ Voice UDP iniciado para {self.user_id} (SSRC: {self.ssrc})")
-                return True
-            else:
-                print(f"⚠️ Resposta inesperada do voice WS: {data}")
+            # Aguarda resposta com timeout
+            try:
+                resp, addr = self.udp_socket.recvfrom(74)
+                print(f"[Voice] Resposta recebida de {addr}")
+            except socket.timeout:
+                print("[Voice] Timeout aguardando resposta UDP")
                 return False
+
+            external_ip = resp[8:72].decode('utf-8').strip('\x00')
+            external_port = struct.unpack_from('>H', resp, 72)[0]
+            print(f"[Voice] IP externo: {external_ip}, Porta externa: {external_port}")
+
+            self.voice_ip = external_ip
+            self.voice_port = external_port
+
+            # Envia confirmação para o WS
+            await self.ws.send(json.dumps({
+                "op": 1,
+                "d": {
+                    "protocol": "udp",
+                    "data": {
+                        "address": external_ip,
+                        "port": external_port,
+                        "mode": mode
+                    }
+                }
+            }))
+            print("[Voice] Confirmação enviada ao WS")
+
+            self.is_running = True
+            self.udp_task = asyncio.create_task(self._udp_heartbeat())
+            print(f"✅ Voice UDP iniciado para {self.user_id}")
+            return True
+
         except asyncio.TimeoutError:
             print(f"❌ Timeout no handshake UDP para {self.user_id}")
             return False
         except Exception as e:
             print(f"❌ Erro ao iniciar conexão de voz: {e}")
+            import traceback
+            traceback.print_exc()
             return False
 
     async def _udp_heartbeat(self):
@@ -695,10 +716,14 @@ async def gateway_presence(user_id: int):
     super_props = fingerprint_mgr.get(vary=False)
 
     async with aiohttp.ClientSession() as aio_session:
-        async with aio_session.get("https://discord.com/api/v10/gateway") as resp:
-            if resp.status != 200:
-                return
-            gateway_url = (await resp.json())['url'] + "/?v=10&encoding=json"
+        # Obtém gateway dinamicamente
+        try:
+            async with aio_session.get("https://discord.com/api/v10/gateway") as resp:
+                if resp.status != 200:
+                    raise Exception("Gateway API failed")
+                gateway_url = (await resp.json())['url'] + "/?v=10&encoding=json"
+        except Exception:
+            gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
         try:
             async with aio_session.ws_connect(gateway_url) as ws:
@@ -1095,7 +1120,7 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     await post_task_rest(interaction.user.id)
 
 # ============================================================
-# PERFORM_VOICE_FARM CORRIGIDO (com gateway dinâmico)
+# PERFORM_VOICE_FARM CORRIGIDO (com gateway dinâmico e fallback)
 # ============================================================
 async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     data = get_user(user_id)
@@ -1105,12 +1130,17 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     headers = build_headers({"Authorization": token})
 
     async with aiohttp.ClientSession() as aio_session:
-        # Obtém o URL do gateway via API
-        async with aio_session.get("https://discord.com/api/v10/gateway") as resp_gw:
-            if resp_gw.status != 200:
-                return await progress_msg.edit(content='❌ Erro ao obter gateway.')
-            gw_data = await resp_gw.json()
-            gateway_url = gw_data['url'] + "?v=10&encoding=json"
+        # Obtém o URL do gateway via API (com fallback)
+        try:
+            async with aio_session.get("https://discord.com/api/v10/gateway") as resp_gw:
+                if resp_gw.status != 200:
+                    raise Exception("Gateway API failed")
+                gw_data = await resp_gw.json()
+                gateway_url = gw_data['url'] + "?v=10&encoding=json"
+                print(f"[Voice] Gateway URL obtido: {gateway_url}")
+        except Exception as e:
+            print(f"[Voice] Erro ao obter gateway: {e}, usando fallback")
+            gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
         # Obtém informações do canal de voz
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
@@ -1122,10 +1152,14 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
             return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
         voice_ws = await aio_session.ws_connect(gateway_url)
+        print("[Voice] Conectado ao WebSocket de voz")
         try:
+            # Recebe hello
             hello = await voice_ws.receive_json()
             base_interval = hello['d']['heartbeat_interval'] / 1000.0
+            print(f"[Voice] Hello recebido, heartbeat interval: {base_interval}s")
 
+            # Autentica
             await voice_ws.send_json({
                 "op": 2,
                 "d": {
@@ -1133,8 +1167,18 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
                     "properties": fingerprint_mgr.get(vary=False)
                 }
             })
-            await voice_ws.receive_json()
+            print("[Voice] Enviado op:2 (autenticação)")
 
+            # Aguarda ready (op:0)
+            while True:
+                msg = await voice_ws.receive_json()
+                if msg.get('op') == 0:
+                    print("[Voice] Ready recebido")
+                    break
+                else:
+                    print(f"[Voice] Ignorando op {msg.get('op')} antes do ready")
+
+            # Entra no canal de voz
             await voice_ws.send_json({
                 "op": 4,
                 "d": {
@@ -1144,6 +1188,7 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
                     "self_deaf": True
                 }
             })
+            print("[Voice] Enviado op:4 (entrar na call)")
 
             voice = VoiceConnection(user_id, voice_ws, token)
             if not await voice.start():
@@ -1154,7 +1199,6 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
             print(f"📞 Utilizador {user_id} entrou na call por {hours}h")
 
             end_time = time.time() + (hours * 3600)
-            last_heartbeat = time.time()
             last_log = time.time()
 
             while time.time() < end_time and not data['call_cancel'].is_set():
@@ -1173,13 +1217,12 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
 
                 try:
                     msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
-                    if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                    if msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
                         print(f"⚠️ WebSocket de voz fechado (tipo {msg.type}) para {user_id}")
                         break
                 except asyncio.TimeoutError:
                     try:
                         await voice_ws.send_json({"op": 1, "d": None})
-                        last_heartbeat = time.time()
                     except Exception as e:
                         print(f"⚠️ Erro ao enviar heartbeat de voz: {e}")
                         break
@@ -1200,8 +1243,13 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
             await post_task_rest(user_id)
         except Exception as e:
             print(f"❌ Erro geral na voz: {e}")
+            import traceback
+            traceback.print_exc()
             await progress_msg.edit(content=f'❌ Erro: {str(e)[:100]}')
-            await voice_ws.close()
+            try:
+                await voice_ws.close()
+            except:
+                pass
 
 # ============================================================
 # MODAIS
@@ -1355,7 +1403,7 @@ class CallModal(discord.ui.Modal, title='🎧 Configurar Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL (SELECT + BOTÕES) – inalterado
+# PAINEL (SELECT + BOTÕES)
 # ============================================================
 class CategorySelect(discord.ui.Select):
     def __init__(self, user_id):
