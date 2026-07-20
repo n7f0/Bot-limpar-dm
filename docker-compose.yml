@@ -4,14 +4,11 @@ services:
     build: .
     container_name: bot-limpar-dm-bot
     restart: always
-    # network_mode: "host"   # REMOVIDO para permitir DNS personalizado
+    network_mode: bridge   # <-- importante
     dns:
       - 8.8.8.8
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
     volumes:
-      - data:/app
-
-volumes:
-  data:
+      - ./:/app   # <-- bind mount para refletir alterações
