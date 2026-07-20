@@ -4,7 +4,7 @@ services:
     build: .
     container_name: bot-limpar-dm-bot
     restart: always
-    # network_mode: "host"   ← remova ou comente esta linha
+    # network_mode: "host"   # REMOVIDO para permitir DNS personalizado
     dns:
       - 8.8.8.8
       - 1.1.1.1
