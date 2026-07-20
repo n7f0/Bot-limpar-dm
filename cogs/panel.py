@@ -1,3 +1,4 @@
+sudo docker exec -it bot-limpar-dm-bot bash -c "cat > /app/cogs/panel.py" << 'EOF'
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -168,8 +169,8 @@ class Panel(commands.Cog):
         self.bot = bot
         self.active_tasks = {}  # user_id -> evento de cancelamento
 
-    @app_commands.command(name='paineldm', description='Abre o painel de controle completo')
-    async def paineldm(self, interaction: discord.Interaction):
+    @app_commands.command(name='painel', description='Abre o painel de controle completo')
+    async def painel(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user = User(interaction.user.id)
         embed = self._build_dashboard_embed(user)
@@ -705,3 +706,4 @@ class ButtonStopCall(discord.ui.Button):
 # ============================================================
 async def setup(bot):
     await bot.add_cog(Panel(bot))
+EOF"
