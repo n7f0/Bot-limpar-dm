@@ -9,9 +9,9 @@ RUN git clone https://${GITHUB_TOKEN}@github.com/n7f0/Bot-limpar-dm.git . || git
 
 # 🔥 CRIA TODOS OS __INIT__.PY VAZIOS
 RUN mkdir -p /app/cogs /app/utils /app/models && \
-    touch /app/cogs/__init__.py && \
-    touch /app/utils/__init__.py && \
-    touch /app/models/__init__.py
+    echo "" > /app/cogs/__init__.py && \
+    echo "" > /app/utils/__init__.py && \
+    echo "" > /app/models/__init__.py
 
 RUN pip install --no-cache-dir -r requirements.txt
 
