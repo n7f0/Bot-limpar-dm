@@ -9,6 +9,7 @@ from utils.security import load_encryption_key
 logger = get_logger()
 
 load_encryption_key()
+init_db()
 
 intents = discord.Intents.default()
 intents.members = True
@@ -18,7 +19,6 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_extensions():
-    # Lista de todos os cogs
     cogs = [
         "cogs.panel",
         "cogs.voice",
