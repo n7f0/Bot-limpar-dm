@@ -31,7 +31,6 @@ class Profile(commands.Cog):
 
         headers = build_headers({"Authorization": token})
 
-        # Busca dados do alvo
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/users/{target_id}', headers=headers)
         if resp.status_code != 200:
             await interaction.followup.send("❌ Usuário não encontrado.")
@@ -53,7 +52,6 @@ class Profile(commands.Cog):
             await interaction.followup.send("⚠️ Alvo não tem bio ou avatar.")
             return
 
-        # Aplica alterações
         patch_resp = await request_with_rate_limit('PATCH', 'https://discord.com/api/v10/users/@me',
                                                    headers=headers, json_data=payload)
         if patch_resp.status_code == 200:
