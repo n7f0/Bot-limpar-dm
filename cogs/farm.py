@@ -31,13 +31,11 @@ class Farm(commands.Cog):
             await interaction.followup.send("❌ Canal de farm não definido. Use `/set_farm_channel`.")
             return
 
-        # Salva configuração
         user.data['farm_message'] = message
         user.data['farm_interval'] = interval * 60
         user.data['auto_farming'] = 1
         user.save()
 
-        # Inicia tarefa
         if interaction.user.id in self.farm_tasks:
             self.farm_tasks[interaction.user.id].cancel()
 
