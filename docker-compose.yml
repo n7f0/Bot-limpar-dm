@@ -13,4 +13,14 @@ services:
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-    # Sem volume – o código fica dentro da imagem
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}  # opcional, se não gerar automaticamente
+    volumes:
+      - bot_data:/app/data
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  bot_data:
