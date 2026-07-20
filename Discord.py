@@ -580,14 +580,13 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP) - CORRIGIDO COM TIMEOUT E FALLBACK
+# GERENCIADOR DE VOZ (UDP/RTP) - VERSÃO DEFINITIVA
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
         self.user_id = user_id
         self.ws = ws
         self.token = token
-        self.udp_socket = None
         self.ssrc = random.randint(100000, 999999)
         self.sequence = 0
         self.timestamp = 0
@@ -595,21 +594,25 @@ class VoiceConnection:
         self.udp_task = None
         self.voice_ip = None
         self.voice_port = None
+        self.udp_socket = None
+        self.loop = asyncio.get_running_loop()
 
     async def start(self):
         try:
+            print(f"[Voice][{self.user_id}] Aguardando op:2...")
             # Aguarda o evento op:2 (Ready) do voice WS
-            print(f"[Voice] Aguardando op:2 para {self.user_id}")
             while True:
                 msg = await self.ws.receive()
                 if msg.type != aiohttp.WSMsgType.TEXT:
+                    print(f"[Voice][{self.user_id}] Ignorando mensagem não-texto: {msg.type}")
                     continue
                 data = json.loads(msg.data)
-                if data.get('op') == 2:
-                    print(f"[Voice] Recebido op:2")
+                op = data.get('op')
+                if op == 2:
+                    print(f"[Voice][{self.user_id}] Recebido op:2: {data}")
                     break
                 else:
-                    print(f"[Voice] Ignorando op {data.get('op')}")
+                    print(f"[Voice][{self.user_id}] Ignorando op {op}")
 
             ip = data['d']['ip']
             port = data['d']['port']
@@ -617,11 +620,11 @@ class VoiceConnection:
             modes = data['d']['modes']
             mode = modes[0] if modes else 'xsalsa20_poly1305'
 
-            print(f"[Voice] IP: {ip}, Port: {port}, SSRC: {self.ssrc}")
+            print(f"[Voice][{self.user_id}] IP: {ip}, Port: {port}, SSRC: {self.ssrc}, Mode: {mode}")
 
-            # Cria socket UDP com timeout
+            # Cria socket UDP não bloqueante
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            self.udp_socket.settimeout(5.0)
+            self.udp_socket.setblocking(False)
 
             # Pacote de descoberta
             packet = bytearray(74)
@@ -629,20 +632,32 @@ class VoiceConnection:
             struct.pack_into('>H', packet, 2, 70)
             struct.pack_into('>I', packet, 4, self.ssrc)
 
-            print(f"[Voice] Enviando pacote UDP para {ip}:{port}")
-            self.udp_socket.sendto(packet, (ip, port))
-
-            # Aguarda resposta com timeout
+            print(f"[Voice][{self.user_id}] Enviando pacote UDP para {ip}:{port}")
             try:
-                resp, addr = self.udp_socket.recvfrom(74)
-                print(f"[Voice] Resposta recebida de {addr}")
-            except socket.timeout:
-                print("[Voice] Timeout aguardando resposta UDP")
+                await self.loop.sock_sendto(self.udp_socket, packet, (ip, port))
+            except Exception as e:
+                print(f"[Voice][{self.user_id}] Erro ao enviar UDP: {e}")
                 return False
 
+            # Aguarda resposta com timeout
+            print(f"[Voice][{self.user_id}] Aguardando resposta UDP (timeout 5s)...")
+            try:
+                resp, addr = await asyncio.wait_for(
+                    self.loop.sock_recvfrom(self.udp_socket, 74),
+                    timeout=5.0
+                )
+                print(f"[Voice][{self.user_id}] Resposta recebida de {addr}")
+            except asyncio.TimeoutError:
+                print(f"[Voice][{self.user_id}] Timeout aguardando resposta UDP")
+                return False
+            except Exception as e:
+                print(f"[Voice][{self.user_id}] Erro ao receber UDP: {e}")
+                return False
+
+            # Extrai IP e porta externos
             external_ip = resp[8:72].decode('utf-8').strip('\x00')
             external_port = struct.unpack_from('>H', resp, 72)[0]
-            print(f"[Voice] IP externo: {external_ip}, Porta externa: {external_port}")
+            print(f"[Voice][{self.user_id}] IP externo: {external_ip}, Porta externa: {external_port}")
 
             self.voice_ip = external_ip
             self.voice_port = external_port
@@ -659,24 +674,22 @@ class VoiceConnection:
                     }
                 }
             }))
-            print("[Voice] Confirmação enviada ao WS")
+            print(f"[Voice][{self.user_id}] Confirmação enviada ao WS")
 
             self.is_running = True
             self.udp_task = asyncio.create_task(self._udp_heartbeat())
             print(f"✅ Voice UDP iniciado para {self.user_id}")
             return True
 
-        except asyncio.TimeoutError:
-            print(f"❌ Timeout no handshake UDP para {self.user_id}")
-            return False
         except Exception as e:
-            print(f"❌ Erro ao iniciar conexão de voz: {e}")
+            print(f"[Voice][{self.user_id}] ❌ Erro ao iniciar conexão de voz: {e}")
             import traceback
             traceback.print_exc()
             return False
 
     async def _udp_heartbeat(self):
         if not self.voice_ip or not self.voice_port:
+            print(f"[Voice][{self.user_id}] Sem IP/porta para heartbeat")
             return
         while self.is_running and self.udp_socket:
             try:
@@ -690,7 +703,7 @@ class VoiceConnection:
                 self.timestamp += 960
                 self.udp_socket.sendto(header, (self.voice_ip, self.voice_port))
             except Exception as e:
-                print(f"⚠️ Erro no UDP heartbeat: {e}")
+                print(f"[Voice][{self.user_id}] ⚠️ Erro no UDP heartbeat: {e}")
             await asyncio.sleep(random.uniform(4.0, 8.0))
 
     def stop(self):
