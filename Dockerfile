@@ -7,32 +7,42 @@ WORKDIR /app
 ARG GITHUB_TOKEN
 RUN git clone https://${GITHUB_TOKEN}@github.com/n7f0/Bot-limpar-dm.git .
 
-# 🔥 GARANTE QUE O PANEL.PY ESTÁ CORRETO (sobrescreve)
-RUN echo 'import discord\n\
-from discord import app_commands\n\
-from discord.ext import commands\n\
-from models.user import User\n\
-from utils.logger import get_logger\n\
-\n\
-logger = get_logger(__name__)\n\
-\n\
-class Panel(commands.Cog):\n\
-    def __init__(self, bot):\n\
-        self.bot = bot\n\
-\n\
-    @app_commands.command(name="painel", description="Abre o painel de controle")\n\
-    async def painel(self, interaction: discord.Interaction):\n\
-        await interaction.response.defer()\n\
-        user = User(interaction.user.id)\n\
-        embed = discord.Embed(title="🛡️ Dashboard", color=discord.Color.blue())\n\
-        tokens = user.data.get("tokens", [])\n\
-        embed.add_field(name="Tokens", value=f"{len(tokens)} configurados", inline=True)\n\
-        embed.add_field(name="Canal de Limpeza", value=f"<#{user.data.get("chat_id")}>" if user.data.get("chat_id") else "Não definido", inline=False)\n\
-        embed.add_field(name="Auto-Farm", value="✅ Ativo" if user.data.get("auto_farming") else "❌ Inativo", inline=True)\n\
-        await interaction.followup.send(embed=embed)\n\
-\n\
-async def setup(bot):\n\
-    await bot.add_cog(Panel(bot))' > /app/cogs/panel.py
+# 🔥 GARANTE QUE O PANEL.PY ESTÁ CORRETO (usando heredoc)
+RUN cat > /app/cogs/panel.py <<'EOF'
+import discord
+from discord import app_commands
+from discord.ext import commands
+from models.user import User
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+class Panel(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+
+    @app_commands.command(name='painel', description='Abre o painel de controle')
+    async def painel(self, interaction: discord.Interaction):
+        await interaction.response.defer()
+        user = User(interaction.user.id)
+        embed = discord.Embed(title='🛡️ Dashboard', color=discord.Color.blue())
+        tokens = user.data.get('tokens', [])
+        embed.add_field(name='Tokens', value=f'{len(tokens)} configurados', inline=True)
+        embed.add_field(
+            name='Canal de Limpeza',
+            value=f'<#{user.data.get("chat_id")}>' if user.data.get('chat_id') else 'Não definido',
+            inline=False
+        )
+        embed.add_field(
+            name='Auto-Farm',
+            value='✅ Ativo' if user.data.get('auto_farming') else '❌ Inativo',
+            inline=True
+        )
+        await interaction.followup.send(embed=embed)
+
+async def setup(bot):
+    await bot.add_cog(Panel(bot))
+EOF
 
 RUN pip install --no-cache-dir -r requirements.txt
 
