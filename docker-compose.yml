@@ -4,7 +4,7 @@ services:
     build:
       context: .
       args:
-        GITHUB_TOKEN: ${GITHUB_TOKEN}   # opcional, se repo privado
+        GITHUB_TOKEN: ${GITHUB_TOKEN}
     container_name: bot-limpar-dm-bot
     restart: always
     network_mode: bridge
@@ -13,4 +13,4 @@ services:
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-    # Sem volumes – o código fica dentro da imagem
+    # Sem volume – o código fica dentro da imagem
