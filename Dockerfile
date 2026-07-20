@@ -5,14 +5,17 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Clona o repositório (se falhar, o build para)
+# Clone do repositório (opcional, mas mantido)
 ARG GITHUB_TOKEN
 RUN git clone https://${GITHUB_TOKEN}@github.com/n7f0/Bot-limpar-dm.git . || git clone https://github.com/n7f0/Bot-limpar-dm.git .
 
-# 🔥 CRIA A ESTRUTURA DE PASTAS (caso não exista)
+# Cria estrutura de pastas
 RUN mkdir -p /app/cogs /app/utils /app/models /app/data
 
-# 🔥 CRIA O PANEL.PY DIRETAMENTE (garantido)
+# 🔥 CRIA TODOS OS __init__.py VAZIOS (fundamental)
+RUN touch /app/cogs/__init__.py /app/utils/__init__.py /app/models/__init__.py
+
+# 🔥 CRIA O PANEL.PY (garantido)
 RUN cat > /app/cogs/panel.py <<'EOF'
 import discord
 from discord import app_commands
@@ -49,7 +52,7 @@ async def setup(bot):
     await bot.add_cog(Panel(bot))
 EOF
 
-# 🔥 CRIA OS ARQUIVOS ESSENCIAIS QUE PODEM FALTAR
+# 🔥 CRIA O MAIN.PY
 RUN cat > /app/main.py <<'EOF'
 import discord
 from discord.ext import commands
@@ -125,7 +128,7 @@ if __name__ == "__main__":
     asyncio.run(main())
 EOF
 
-# 🔥 CRIA UTILS/LOGGER.PY (se não existir)
+# 🔥 CRIA UTILS/LOGGER.PY
 RUN cat > /app/utils/logger.py <<'EOF'
 import logging
 import sys
@@ -140,7 +143,7 @@ def get_logger(name=None):
     return logger
 EOF
 
-# 🔥 CRIA UTILS/DB.PY (mínimo)
+# 🔥 CRIA UTILS/DB.PY
 RUN cat > /app/utils/db.py <<'EOF'
 import sqlite3
 import os
@@ -176,7 +179,7 @@ def init_db():
     conn.close()
 EOF
 
-# 🔥 CRIA UTILS/SECURITY.PY (mínimo)
+# 🔥 CRIA UTILS/SECURITY.PY
 RUN cat > /app/utils/security.py <<'EOF'
 import os
 from cryptography.fernet import Fernet
@@ -210,7 +213,7 @@ def decrypt(token: str) -> str:
     return f.decrypt(token.encode()).decode()
 EOF
 
-# 🔥 CRIA MODELS/USER.PY (mínimo)
+# 🔥 CRIA MODELS/USER.PY
 RUN cat > /app/models/user.py <<'EOF'
 import json
 from utils.db import get_connection
