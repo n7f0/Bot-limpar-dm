@@ -24,7 +24,6 @@ class Admin(commands.Cog):
         embed.add_field(name="Usuários", value=total_users, inline=True)
         embed.add_field(name="Tarefas agendadas", value=total_tasks, inline=True)
         embed.add_field(name="Cogs carregados", value=len(self.bot.cogs), inline=True)
-        embed.add_field(name="Uptime", value="calculando...", inline=False)
         await interaction.response.send_message(embed=embed)
 
     @app_commands.command(name='reload_cog', description='Recarrega um cog (admin)')
