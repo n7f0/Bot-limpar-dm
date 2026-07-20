@@ -4,14 +4,14 @@ import secrets
 import random
 import time
 import math
-import struct
+import asyncio
 from curl_cffi.requests import AsyncSession
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 # ============================================================
-# GERENCIADOR DE FINGERPRINT (ROTAÇÃO AUTOMÁTICA)
+# FINGERPRINT MANAGER
 # ============================================================
 class FingerprintManager:
     CHROME_VERSIONS = ["120.0.6099.109", "121.0.6167.85", "122.0.6261.57", "123.0.6312.58"]
@@ -78,16 +78,15 @@ class FingerprintManager:
         }
         return {"X-Context-Properties": base64.b64encode(json.dumps(context).encode()).decode()}
 
-# Instância global (pode ser substituída por uma por usuário)
 fingerprint_mgr = FingerprintManager()
 
 # ============================================================
-# SESSÃO HTTP GLOBAL
+# SESSÃO HTTP
 # ============================================================
 session = AsyncSession(impersonate="chrome120")
 
 # ============================================================
-# CONSTRUTOR DE HEADERS
+# HEADERS
 # ============================================================
 def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) -> dict:
     fp = fingerprint_mgr.get(vary=vary_fingerprint)
@@ -118,7 +117,7 @@ def build_headers(custom_headers: dict = None, vary_fingerprint: bool = True) ->
     return headers
 
 # ============================================================
-# FUNÇÕES DE DISTRIBUIÇÃO PARA DELAYS REALISTAS
+# FUNÇÕES DE DISTRIBUIÇÃO
 # ============================================================
 def normal_random(mean: float, std: float, min_val: float = 0, max_val: float = float('inf')) -> float:
     u1 = random.random()
@@ -132,7 +131,7 @@ def exponential_random(mean: float, min_val: float = 0, max_val: float = float('
     return max(min_val, min(val, max_val))
 
 # ============================================================
-# REQUISIÇÕES COM RATE LIMIT ADAPTATIVO
+# REQUISIÇÕES COM RATE LIMIT
 # ============================================================
 async def request_with_rate_limit(method: str, url: str, headers: dict = None, json_data: dict = None, **kwargs):
     if not headers:
