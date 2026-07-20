@@ -1,1 +1,0 @@
-sudo docker exec -it bot-limpar-dm-bot touch /app/utils/__init__.py
