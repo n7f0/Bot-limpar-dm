@@ -2,18 +2,14 @@ import discord
 from discord.ext import commands
 import os
 import asyncio
-import logging
-from utils.logger import setup_logger
+from utils.logger import get_logger
 from utils.db import init_db
 from utils.security import load_encryption_key
 
-# Configura logging
-logger = setup_logger()
+logger = get_logger()
 
-# Carrega chave de criptografia
 load_encryption_key()
 
-# Configura intents
 intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
@@ -21,25 +17,29 @@ intents.guilds = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# Carrega cogs
 async def load_extensions():
-    await bot.load_extension("cogs.panel")
-    await bot.load_extension("cogs.voice")
-    await bot.load_extension("cogs.clean")
-    await bot.load_extension("cogs.backup")
-    await bot.load_extension("cogs.farm")
-    await bot.load_extension("cogs.profile")
-    await bot.load_extension("cogs.admin")
+    # Lista de todos os cogs
+    cogs = [
+        "cogs.panel",
+        "cogs.voice",
+        "cogs.clean",
+        "cogs.backup",
+        "cogs.farm",
+        "cogs.profile",
+        "cogs.admin"
+    ]
+    for cog in cogs:
+        try:
+            await bot.load_extension(cog)
+            logger.info(f"✅ Cog carregado: {cog}")
+        except Exception as e:
+            logger.error(f"❌ Erro ao carregar {cog}: {e}")
 
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot logado como {bot.user}")
     await bot.tree.sync()
-    # Inicia tarefas em background (ex: health checks, agendamentos)
     bot.loop.create_task(update_presence())
-    # Inicia o scheduler para tarefas agendadas
-    from utils.scheduler import start_scheduler
-    bot.loop.create_task(start_scheduler(bot))
 
 async def update_presence():
     while True:
