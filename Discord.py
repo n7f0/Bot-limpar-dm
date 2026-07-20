@@ -39,7 +39,7 @@ if not TOKEN_BOT:
 
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True  # Correção: Intent privilegiado ativado
+intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # ============================================================
@@ -580,7 +580,7 @@ async def random_reaction(channel_id: str, message_id: str, token: str):
         pass
 
 # ============================================================
-# GERENCIADOR DE VOZ (UDP/RTP) - PROTOCOLO ATUALIZADO
+# GERENCIADOR DE VOZ (UDP/RTP) - CORRIGIDO
 # ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
@@ -593,6 +593,8 @@ class VoiceConnection:
         self.timestamp = 0
         self.is_running = False
         self.udp_task = None
+        self.voice_ip = None
+        self.voice_port = None
 
     async def start(self):
         try:
@@ -608,22 +610,23 @@ class VoiceConnection:
                 self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                 self.udp_socket.settimeout(10.0)
 
-                # --- NOVO PROTOCOLO DE DESCOBERTA DE IP DO DISCORD ---
                 packet = bytearray(74)
-                struct.pack_into('>H', packet, 0, 1)      # Tipo 1 (Request)
-                struct.pack_into('>H', packet, 2, 70)     # Tamanho (70 bytes após o cabeçalho)
-                struct.pack_into('>I', packet, 4, self.ssrc) # SSRC
-                
-                self.udp_socket.sendto(packet, (ip, port))
+                struct.pack_into('>H', packet, 0, 1)
+                struct.pack_into('>H', packet, 2, 70)
+                struct.pack_into('>I', packet, 4, self.ssrc)
 
-                # Recebe a resposta do Discord
-                resp, _ = self.udp_socket.recvfrom(74)
-                
-                # O IP vem como uma string entre o byte 8 e 72
+                def udp_discovery():
+                    self.udp_socket.sendto(packet, (ip, port))
+                    resp, _ = self.udp_socket.recvfrom(74)
+                    return resp
+
+                resp = await asyncio.to_thread(udp_discovery)
+
                 external_ip = resp[8:72].decode('utf-8').strip('\x00')
-                # A porta agora vem empacotada no final exato do pacote (bytes 72 a 74)
                 external_port = struct.unpack_from('>H', resp, 72)[0]
-                # -----------------------------------------------------
+
+                self.voice_ip = external_ip
+                self.voice_port = external_port
 
                 await self.ws.send(json.dumps({
                     "op": 1,
@@ -641,11 +644,19 @@ class VoiceConnection:
                 self.udp_task = asyncio.create_task(self._udp_heartbeat())
                 print(f"✅ Voice UDP iniciado para {self.user_id} (SSRC: {self.ssrc})")
                 return True
+            else:
+                print(f"⚠️ Resposta inesperada do voice WS: {data}")
+                return False
+        except asyncio.TimeoutError:
+            print(f"❌ Timeout no handshake UDP para {self.user_id}")
+            return False
         except Exception as e:
             print(f"❌ Erro ao iniciar conexão de voz: {e}")
             return False
 
     async def _udp_heartbeat(self):
+        if not self.voice_ip or not self.voice_port:
+            return
         while self.is_running and self.udp_socket:
             try:
                 header = bytearray(12)
@@ -656,11 +667,10 @@ class VoiceConnection:
                 struct.pack_into('>I', header, 8, self.ssrc)
                 self.sequence += 1
                 self.timestamp += 960
-                self.udp_socket.sendto(header, (self.udp_socket.getpeername()[0], self.udp_socket.getpeername()[1]))
+                self.udp_socket.sendto(header, (self.voice_ip, self.voice_port))
             except Exception as e:
                 print(f"⚠️ Erro no UDP heartbeat: {e}")
-            wait = random.uniform(4.0, 8.0)
-            await asyncio.sleep(wait)
+            await asyncio.sleep(random.uniform(4.0, 8.0))
 
     def stop(self):
         self.is_running = False
@@ -1084,6 +1094,9 @@ async def perform_cleanup(interaction, token, chat_id, progress_msg):
     await progress_msg.edit(content=f'✅ **Limpeza finalizada.** Deletadas: {messages_deleted}. Tempo: {int(time.time()-start_time)}s.')
     await post_task_rest(interaction.user.id)
 
+# ============================================================
+# PERFORM_VOICE_FARM CORRIGIDO (com gateway dinâmico)
+# ============================================================
 async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     data = get_user(user_id)
     token = data['token']
@@ -1092,6 +1105,14 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
     headers = build_headers({"Authorization": token})
 
     async with aiohttp.ClientSession() as aio_session:
+        # Obtém o URL do gateway via API
+        async with aio_session.get("https://discord.com/api/v10/gateway") as resp_gw:
+            if resp_gw.status != 200:
+                return await progress_msg.edit(content='❌ Erro ao obter gateway.')
+            gw_data = await resp_gw.json()
+            gateway_url = gw_data['url'] + "?v=10&encoding=json"
+
+        # Obtém informações do canal de voz
         resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
         if resp.status_code != 200:
             return await progress_msg.edit(content=f'❌ Erro ao acessar o canal (status {resp.status_code}).')
@@ -1100,82 +1121,87 @@ async def perform_voice_farm(user_id, channel_id, hours, progress_msg):
         if not guild_id:
             return await progress_msg.edit(content='❌ O canal não pertence a um servidor (precisa ser canal de voz de servidor).')
 
-        voice_ws = await aio_session.ws_connect('wss://gateway.discord.gg/?v=10&encoding=json')
-        hello = await voice_ws.receive_json()
-        base_interval = hello['d']['heartbeat_interval'] / 1000.0
-
-        await voice_ws.send_json({
-            "op": 2,
-            "d": {
-                "token": token,
-                "properties": fingerprint_mgr.get(vary=False)
-            }
-        })
-        await voice_ws.receive_json()
-
-        await voice_ws.send_json({
-            "op": 4,
-            "d": {
-                "guild_id": guild_id,
-                "channel_id": str(channel_id),
-                "self_mute": True,
-                "self_deaf": True
-            }
-        })
-
-        voice = VoiceConnection(user_id, voice_ws, token)
-        if not await voice.start():
-            await voice_ws.close()
-            return await progress_msg.edit(content='❌ Falha ao estabelecer conexão UDP.')
-
-        await progress_msg.edit(content=f'✅ **Na call com RTP ativo por {hours}h**')
-        print(f"📞 Utilizador {user_id} entrou na call por {hours}h")
-
-        end_time = time.time() + (hours * 3600)
-        last_heartbeat = time.time()
-        last_log = time.time()
-
-        while time.time() < end_time and not data['call_cancel'].is_set():
-            if await check_sleep_mode(user_id):
-                print(f"💤 Modo sono ativado – saindo da call para {user_id}")
-                break
-
-            if not data.get('token_valid', True):
-                print(f"⚠️ Token inválido – saindo da call para {user_id}")
-                break
-
-            if time.time() - last_log > 60:
-                remaining = max(0, int((end_time - time.time()) / 60))
-                await progress_msg.edit(content=f'🎧 **Na call** – faltam `{remaining}` minutos.')
-                last_log = time.time()
-
-            try:
-                msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
-                if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                    print(f"⚠️ WebSocket de voz fechado (tipo {msg.type}) para {user_id}")
-                    break
-            except asyncio.TimeoutError:
-                try:
-                    await voice_ws.send_json({"op": 1, "d": None})
-                    last_heartbeat = time.time()
-                except Exception as e:
-                    print(f"⚠️ Erro ao enviar heartbeat de voz: {e}")
-                    break
-            except Exception as e:
-                print(f"❌ Exceção no loop de voz: {e}")
-                break
-
-            await asyncio.sleep(1.0)
-
-        voice.stop()
+        voice_ws = await aio_session.ws_connect(gateway_url)
         try:
+            hello = await voice_ws.receive_json()
+            base_interval = hello['d']['heartbeat_interval'] / 1000.0
+
+            await voice_ws.send_json({
+                "op": 2,
+                "d": {
+                    "token": token,
+                    "properties": fingerprint_mgr.get(vary=False)
+                }
+            })
+            await voice_ws.receive_json()
+
+            await voice_ws.send_json({
+                "op": 4,
+                "d": {
+                    "guild_id": guild_id,
+                    "channel_id": str(channel_id),
+                    "self_mute": True,
+                    "self_deaf": True
+                }
+            })
+
+            voice = VoiceConnection(user_id, voice_ws, token)
+            if not await voice.start():
+                await voice_ws.close()
+                return await progress_msg.edit(content='❌ Falha ao estabelecer conexão UDP.')
+
+            await progress_msg.edit(content=f'✅ **Na call com RTP ativo por {hours}h**')
+            print(f"📞 Utilizador {user_id} entrou na call por {hours}h")
+
+            end_time = time.time() + (hours * 3600)
+            last_heartbeat = time.time()
+            last_log = time.time()
+
+            while time.time() < end_time and not data['call_cancel'].is_set():
+                if await check_sleep_mode(user_id):
+                    print(f"💤 Modo sono ativado – saindo da call para {user_id}")
+                    break
+
+                if not data.get('token_valid', True):
+                    print(f"⚠️ Token inválido – saindo da call para {user_id}")
+                    break
+
+                if time.time() - last_log > 60:
+                    remaining = max(0, int((end_time - time.time()) / 60))
+                    await progress_msg.edit(content=f'🎧 **Na call** – faltam `{remaining}` minutos.')
+                    last_log = time.time()
+
+                try:
+                    msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
+                    if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                        print(f"⚠️ WebSocket de voz fechado (tipo {msg.type}) para {user_id}")
+                        break
+                except asyncio.TimeoutError:
+                    try:
+                        await voice_ws.send_json({"op": 1, "d": None})
+                        last_heartbeat = time.time()
+                    except Exception as e:
+                        print(f"⚠️ Erro ao enviar heartbeat de voz: {e}")
+                        break
+                except Exception as e:
+                    print(f"❌ Exceção no loop de voz: {e}")
+                    break
+
+                await asyncio.sleep(1.0)
+
+            voice.stop()
+            try:
+                await voice_ws.close()
+            except:
+                pass
+            data['farming_call'] = False
+            await progress_msg.edit(content='⏹️ **Call encerrada.**')
+            print(f"📞 Utilizador {user_id} saiu da call.")
+            await post_task_rest(user_id)
+        except Exception as e:
+            print(f"❌ Erro geral na voz: {e}")
+            await progress_msg.edit(content=f'❌ Erro: {str(e)[:100]}')
             await voice_ws.close()
-        except:
-            pass
-        data['farming_call'] = False
-        await progress_msg.edit(content='⏹️ **Call encerrada.**')
-        print(f"📞 Utilizador {user_id} saiu da call.")
-        await post_task_rest(user_id)
 
 # ============================================================
 # MODAIS
@@ -1329,9 +1355,8 @@ class CallModal(discord.ui.Modal, title='🎧 Configurar Call'):
         bot.loop.create_task(perform_voice_farm(interaction.user.id, channel_id, hours, msg))
 
 # ============================================================
-# PAINEL (SELECT + BOTÕES)
+# PAINEL (SELECT + BOTÕES) – inalterado
 # ============================================================
-
 class CategorySelect(discord.ui.Select):
     def __init__(self, user_id):
         self.user_id = user_id
@@ -1549,12 +1574,11 @@ class VoiceButtonStop(discord.ui.Button):
         await interaction.response.send_message('⏹️ Desconectando...', ephemeral=True)
 
 # ============================================================
-# RICH PRESENCE PERSONALIZADO (COM A CHAVE CORRETA E MANUTENÇÃO DE ESTADO)
+# RICH PRESENCE PERSONALIZADO
 # ============================================================
 async def update_presence():
     while True:
         try:
-            # Correção: Verificação de status online antes de alterar a presença
             if bot.is_ready():
                 uptime = int(time.time() - bot.start_time) if hasattr(bot, 'start_time') else 0
                 hours = uptime // 3600
@@ -1582,7 +1606,7 @@ async def update_presence():
         await asyncio.sleep(30)
 
 # ============================================================
-# COMANDO PRINCIPAL (SEM RESTRIÇÃO DE CARGO)
+# COMANDO PRINCIPAL
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
@@ -1603,7 +1627,7 @@ async def paineldm(interaction: discord.Interaction):
     await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
 # ============================================================
-# EVENTO ON_READY (INICIA A PRESENÇA)
+# EVENTO ON_READY
 # ============================================================
 @bot.event
 async def on_ready():
