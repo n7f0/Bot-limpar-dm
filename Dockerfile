@@ -5,13 +5,11 @@ RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Clone o repositório (substitua pela URL do seu repositório)
-# Use seu token de acesso pessoal se for privado, ou use HTTPS com credenciais
+# O token será passado como build-arg para acessar o repositório privado
 ARG GITHUB_TOKEN
-RUN git clone https://${GITHUB_TOKEN}@github.com/seu-usuario/seu-repositorio.git . || git clone https://github.com/seu-usuario/seu-repositorio.git .
+RUN git clone https://${GITHUB_TOKEN}@github.com/n7f0/Bot-limpar-dm.git .
 
-# Copia requirements.txt (se já estiver no repositório, o clone já trouxe)
-# Mas se quiser garantir, copie localmente ou instale direto
+# Instala dependências
 RUN pip install --no-cache-dir -r requirements.txt
 
 CMD ["python", "Discord.py"]
