@@ -1,4 +1,3 @@
-sudo docker exec -it bot-limpar-dm-bot bash -c "cat > /app/cogs/panel.py" << 'EOF'
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -167,7 +166,7 @@ class VoiceConnection:
 class Panel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_tasks = {}  # user_id -> evento de cancelamento
+        self.active_tasks = {}
 
     @app_commands.command(name='painel', description='Abre o painel de controle completo')
     async def painel(self, interaction: discord.Interaction):
@@ -184,10 +183,7 @@ class Panel(commands.Cog):
         farm_chat_id = user.data.get('farm_chat_id')
         farm_msg = user.data.get('farm_message', '')
         auto_farm = user.data.get('auto_farming', 0)
-        embed = discord.Embed(
-            title="🛡️ Nexzy Pro - Painel",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title="🛡️ Nexzy Pro - Painel", color=discord.Color.blue())
         embed.add_field(name="Tokens", value=f"{len(tokens)} configurados", inline=True)
         embed.add_field(name="Token ativo", value=f"#{default_idx+1}" if tokens else "Nenhum", inline=True)
         embed.add_field(name="Canal (Limpeza/Backup)", value=f"<#{chat_id}>" if chat_id else "Não definido", inline=False)
@@ -197,9 +193,6 @@ class Panel(commands.Cog):
         embed.set_footer(text="Clique nos botões para executar ações")
         return embed
 
-    # ----------------------------------------------------------
-    # MÉTODOS INTERNOS (Clean, Backup, Farm, Call, Clone)
-    # ----------------------------------------------------------
     async def _perform_cleanup(self, user_id, token, chat_id, limit, progress_msg, cancel_event):
         headers = build_headers({"Authorization": token})
         deleted = 0
@@ -516,7 +509,7 @@ class ButtonBackup(discord.ui.Button):
         msg = await interaction.followup.send("📁 Iniciando backup...")
         buffer = await self.cog._perform_backup(interaction.user.id, token, chat_id, msg)
         if buffer:
-            await msg.edit(content=f"✅ Backup concluído!")
+            await msg.edit(content="✅ Backup concluído!")
             await interaction.followup.send(file=discord.File(buffer, filename="backup.txt"))
         else:
             await msg.edit(content="❌ Nenhuma mensagem encontrada.")
@@ -706,4 +699,3 @@ class ButtonStopCall(discord.ui.Button):
 # ============================================================
 async def setup(bot):
     await bot.add_cog(Panel(bot))
-EOF"
