@@ -17,7 +17,7 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_extensions():
-    # Carrega apenas o panel (único cog necessário)
+    # 🔥 CARREGA APENAS O PAINEL – SEM OUTROS COGS
     cogs = ["cogs.panel"]
     for cog in cogs:
         try:
@@ -29,11 +29,21 @@ async def load_extensions():
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot logado como {bot.user}")
+    
+    # 🔥 LIMPA TODOS OS COMANDOS ANTIGOS (remove /clean, /call, etc.)
+    try:
+        await bot.tree.clear_commands()
+        logger.info("✅ Comandos antigos removidos globalmente.")
+    except Exception as e:
+        logger.error(f"❌ Erro ao limpar comandos antigos: {e}")
+    
+    # Sincroniza apenas o comando atual (/paineldm)
     try:
         synced = await bot.tree.sync()
-        logger.info(f"✅ {len(synced)} comandos sincronizados.")
+        logger.info(f"✅ {len(synced)} comando(s) sincronizado(s): {[cmd.name for cmd in synced]}")
     except Exception as e:
-        logger.error(f"❌ Erro ao sincronizar: {e}")
+        logger.error(f"❌ Erro ao sincronizar comandos: {e}")
+    
     bot.loop.create_task(update_presence())
 
 async def update_presence():
