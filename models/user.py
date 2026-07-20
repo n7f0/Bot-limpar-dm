@@ -1,12 +1,47 @@
-from utils.db import get_user, save_user
+import json
+from utils.db import get_connection
 
 class User:
     def __init__(self, user_id):
         self.user_id = user_id
-        self.data = get_user(user_id) or {}
+        self.data = self._load()
+    
+    def _load(self):
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM users WHERE user_id = ?', (self.user_id,))
+        row = cursor.fetchone()
+        conn.close()
+        if row:
+            data = dict(row)
+            if data.get('tokens'):
+                data['tokens'] = json.loads(data['tokens'])
+            else:
+                data['tokens'] = []
+            return data
+        return {'tokens': [], 'default_token_index': 0}
     
     def save(self):
-        save_user(self.user_id, self.data)
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT OR REPLACE INTO users (
+                user_id, tokens, default_token_index, chat_id, farm_chat_id,
+                auto_farming, farm_interval, farm_message, sleep_mode, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ''', (
+            self.user_id,
+            json.dumps(self.data.get('tokens', [])),
+            self.data.get('default_token_index', 0),
+            self.data.get('chat_id'),
+            self.data.get('farm_chat_id'),
+            self.data.get('auto_farming', 0),
+            self.data.get('farm_interval', 120),
+            self.data.get('farm_message', ''),
+            self.data.get('sleep_mode', 0)
+        ))
+        conn.commit()
+        conn.close()
     
     def get_token(self, index=None):
         if index is None:
@@ -15,16 +50,3 @@ class User:
         if tokens and index < len(tokens):
             return tokens[index]
         return None
-    
-    def add_token(self, token):
-        tokens = self.data.get('tokens', [])
-        tokens.append(token)
-        self.data['tokens'] = tokens
-        self.save()
-    
-    def remove_token(self, index):
-        tokens = self.data.get('tokens', [])
-        if tokens and index < len(tokens):
-            del tokens[index]
-            self.data['tokens'] = tokens
-            self.save()
