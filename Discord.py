@@ -1667,11 +1667,16 @@ async def update_presence():
         await asyncio.sleep(30)
 
 # ============================================================
-# COMANDO PRINCIPAL
+# COMANDO PRINCIPAL (CORRIGIDO PARA EVITAR EXPIRAÇÃO)
 # ============================================================
 @bot.tree.command(name='paineldm', description='Abre o painel organizado com persistência de dados.')
 async def paineldm(interaction: discord.Interaction):
+    # Defer para ganhar tempo (3s -> 15min)
+    await interaction.response.defer(ephemeral=False)
+    
+    # Executa warmup (pode demorar, mas já deferimos)
     await warmup()
+    
     embed = discord.Embed(
         title='🛡️ Master Panel - Modo Furtivo',
         description='Use o menu abaixo para navegar entre as categorias.\nTodas as configurações são salvas automaticamente.',
@@ -1685,7 +1690,9 @@ async def paineldm(interaction: discord.Interaction):
     embed.add_field(name='🎧 Voz', value='Call', inline=True)
     embed.set_footer(text='Todas as ações simulam comportamento humano com segurança máxima.')
     view = CategoryView(interaction.user.id, "config")
-    await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
+    
+    # Agora enviamos a mensagem via followup
+    await interaction.followup.send(embed=embed, view=view)
 
 # ============================================================
 # EVENTO ON_READY
