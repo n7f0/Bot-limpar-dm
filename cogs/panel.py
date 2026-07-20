@@ -14,20 +14,17 @@ class Panel(commands.Cog):
     async def painel(self, interaction: discord.Interaction):
         await interaction.response.defer()
         user = User(interaction.user.id)
-        embed = discord.Embed(
-            title="🛡️ Dashboard",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title='🛡️ Dashboard', color=discord.Color.blue())
         tokens = user.data.get('tokens', [])
-        embed.add_field(name="Tokens", value=f"{len(tokens)} configurados", inline=True)
+        embed.add_field(name='Tokens', value=f'{len(tokens)} configurados', inline=True)
         embed.add_field(
-            name="Canal de Limpeza",
-            value=f"<#{user.data.get('chat_id')}>" if user.data.get('chat_id') else "Não definido",
+            name='Canal de Limpeza',
+            value=f'<#{user.data.get("chat_id")}>' if user.data.get('chat_id') else 'Não definido',
             inline=False
         )
         embed.add_field(
-            name="Auto-Farm",
-            value="✅ Ativo" if user.data.get('auto_farming') else "❌ Inativo",
+            name='Auto-Farm',
+            value='✅ Ativo' if user.data.get('auto_farming') else '❌ Inativo',
             inline=True
         )
         await interaction.followup.send(embed=embed)
