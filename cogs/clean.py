@@ -95,6 +95,32 @@ class Clean(commands.Cog):
         user.save()
         await interaction.followup.send(f"✅ Canal definido: <#{channel_id}>")
 
+    @app_commands.command(name='set_farm_channel', description='Define o canal para auto-farm')
+    @app_commands.describe(channel_id='ID do canal de texto')
+    async def set_farm_channel(self, interaction: discord.Interaction, channel_id: str):
+        await interaction.response.defer()
+        try:
+            channel_id = int(channel_id)
+        except ValueError:
+            await interaction.followup.send("❌ ID inválido.")
+            return
+
+        user = User(interaction.user.id)
+        token = user.get_token()
+        if not token:
+            await interaction.followup.send("❌ Token não configurado.")
+            return
+
+        headers = build_headers({"Authorization": token})
+        resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
+        if resp.status_code != 200:
+            await interaction.followup.send("❌ Canal não encontrado ou sem permissão.")
+            return
+
+        user.data['farm_chat_id'] = channel_id
+        user.save()
+        await interaction.followup.send(f"✅ Canal de farm definido: <#{channel_id}>")
+
     async def _perform_cleanup(self, user_id, token, chat_id, limit, progress_msg, cancel_event):
         headers = build_headers({"Authorization": token})
         deleted = 0
@@ -149,3 +175,9 @@ class Clean(commands.Cog):
         elapsed = int(time.time() - start_time)
         logger.info(f"Limpeza concluída: {deleted} mensagens em {elapsed}s para user {user_id}")
         return deleted
+
+# ============================================================
+# SETUP (obrigatório para cogs)
+# ============================================================
+async def setup(bot):
+    await bot.add_cog(Clean(bot))
