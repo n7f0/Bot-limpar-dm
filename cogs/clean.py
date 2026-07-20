@@ -3,13 +3,13 @@ from discord import app_commands
 from discord.ext import commands
 import asyncio
 import time
+import random
 from models.user import User
 from utils.helpers import build_headers, request_with_rate_limit, normal_random, exponential_random
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Constantes de segurança
 MIN_DELAY = 15.0
 MAX_DELAY = 35.0
 PAUSE_AFTER = 20
@@ -20,7 +20,7 @@ MAX_MESSAGES = 150
 class Clean(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_cleanups = {}  # user_id -> cancel_event
+        self.active_cleanups = {}
 
     @app_commands.command(name='clean', description='Limpa suas mensagens do canal configurado')
     @app_commands.describe(limit='Número máximo de mensagens a deletar (padrão: 150)')
@@ -41,7 +41,6 @@ class Clean(commands.Cog):
             await interaction.followup.send(f"❌ Limite máximo é {MAX_MESSAGES} mensagens.")
             return
 
-        # Verifica se já há uma limpeza em andamento
         if interaction.user.id in self.active_cleanups:
             await interaction.followup.send("⏳ Você já tem uma limpeza em andamento. Use `/stop_clean` para interromper.")
             return
@@ -163,7 +162,6 @@ class Clean(commands.Cog):
                     elif deleted % 3 == 0:
                         await progress_msg.edit(content=f"🔄 Limpeza: {deleted}/{limit}")
 
-                # Delay realista entre deleções
                 delay = normal_random((MIN_DELAY + MAX_DELAY) / 2, 5, min_val=MIN_DELAY, max_val=MAX_DELAY)
                 await asyncio.sleep(delay)
 
@@ -176,8 +174,5 @@ class Clean(commands.Cog):
         logger.info(f"Limpeza concluída: {deleted} mensagens em {elapsed}s para user {user_id}")
         return deleted
 
-# ============================================================
-# SETUP (obrigatório para cogs)
-# ============================================================
 async def setup(bot):
     await bot.add_cog(Clean(bot))
