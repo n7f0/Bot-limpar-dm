@@ -32,5 +32,6 @@ class Panel(commands.Cog):
         )
         await interaction.followup.send(embed=embed)
 
+# ⚠️ FUNÇÃO OBRIGATÓRIA – SEM ISSO O COG NÃO CARREGA
 async def setup(bot):
     await bot.add_cog(Panel(bot))
