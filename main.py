@@ -17,15 +17,8 @@ intents.guilds = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_extensions():
-    cogs = [
-        "cogs.panel",
-        "cogs.voice",
-        "cogs.clean",
-        "cogs.backup",
-        "cogs.farm",
-        "cogs.profile",
-        "cogs.admin"
-    ]
+    # Carrega apenas o panel (único cog necessário)
+    cogs = ["cogs.panel"]
     for cog in cogs:
         try:
             await bot.load_extension(cog)
