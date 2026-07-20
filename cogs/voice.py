@@ -11,11 +11,14 @@ import aiohttp
 from aiohttp import WSMsgType
 
 from models.user import User
-from utils.helpers import build_headers, request_with_rate_limit, fingerprint_mgr, normal_random
+from utils.helpers import build_headers, request_with_rate_limit, fingerprint_mgr
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# ============================================================
+# CLASSE DE CONEXÃO DE VOZ (UDP)
+# ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
         self.user_id = user_id
@@ -34,6 +37,7 @@ class VoiceConnection:
     async def start(self):
         try:
             logger.info(f"[Voice][{self.user_id}] Aguardando op:2...")
+            # Aguarda o evento op:2 (Ready) do voice WS
             while True:
                 msg = await self.ws.receive()
                 if msg.type != aiohttp.WSMsgType.TEXT:
@@ -54,9 +58,11 @@ class VoiceConnection:
 
             logger.info(f"[Voice][{self.user_id}] IP: {ip}, Port: {port}, SSRC: {self.ssrc}, Mode: {mode}")
 
+            # Cria socket UDP não bloqueante
             self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.udp_socket.setblocking(False)
 
+            # Pacote de descoberta
             packet = bytearray(74)
             struct.pack_into('>H', packet, 0, 1)
             struct.pack_into('>H', packet, 2, 70)
@@ -69,6 +75,7 @@ class VoiceConnection:
                 logger.error(f"[Voice][{self.user_id}] Erro ao enviar UDP: {e}")
                 return False
 
+            # Aguarda resposta com timeout
             logger.info(f"[Voice][{self.user_id}] Aguardando resposta UDP (timeout 5s)...")
             try:
                 resp, addr = await asyncio.wait_for(
@@ -83,6 +90,7 @@ class VoiceConnection:
                 logger.error(f"[Voice][{self.user_id}] Erro ao receber UDP: {e}")
                 return False
 
+            # Extrai IP e porta externos
             external_ip = resp[8:72].decode('utf-8').strip('\x00')
             external_port = struct.unpack_from('>H', resp, 72)[0]
             logger.info(f"[Voice][{self.user_id}] IP externo: {external_ip}, Porta externa: {external_port}")
@@ -90,6 +98,7 @@ class VoiceConnection:
             self.voice_ip = external_ip
             self.voice_port = external_port
 
+            # Envia confirmação para o WS
             await self.ws.send(json.dumps({
                 "op": 1,
                 "d": {
@@ -141,6 +150,9 @@ class VoiceConnection:
             except:
                 pass
 
+# ============================================================
+# COG DE VOZ
+# ============================================================
 class Voice(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -159,7 +171,6 @@ class Voice(commands.Cog):
             await interaction.followup.send("❌ Nenhum token configurado. Use `/add_token`.")
             return
 
-        # Verifica se já há uma call ativa
         if interaction.user.id in self.active_calls:
             await interaction.followup.send("⏳ Você já tem uma call ativa. Use `/stop_call` para encerrar.")
             return
@@ -302,3 +313,9 @@ class Voice(commands.Cog):
                 logger.error(f"Erro geral na voz: {e}", exc_info=True)
                 await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
                 await voice_ws.close()
+
+# ============================================================
+# SETUP (obrigatório para cogs)
+# ============================================================
+async def setup(bot):
+    await bot.add_cog(Voice(bot))
