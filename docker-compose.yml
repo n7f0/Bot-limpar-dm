@@ -1,10 +1,7 @@
 version: '3.8'
 services:
   bot:
-    build:
-      context: .
-      args:
-        GITHUB_TOKEN: ${GITHUB_TOKEN}
+    build: .
     container_name: bot-limpar-dm-bot
     restart: always
     network_mode: bridge
@@ -13,14 +10,8 @@ services:
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-      - ENCRYPTION_KEY=${ENCRYPTION_KEY}  # opcional, se não gerar automaticamente
     volumes:
-      - bot_data:/app/data
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+      - bot_data:/app/data   # APENAS dados, não o código
 
 volumes:
   bot_data:
