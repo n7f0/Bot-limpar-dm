@@ -1,5 +1,4 @@
 import discord
-from discord import app_commands
 from discord.ext import commands
 import os
 import asyncio
@@ -13,6 +12,7 @@ intents.message_content = True
 intents.guilds = True
 intents.voice_states = True
 
+# Usando o prefixo '!' para comandos de chat comuns (Perfeito para Self-Bots)
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Gerador de Silêncio Contínuo ---
@@ -56,25 +56,16 @@ class PanelView(discord.ui.View):
             logging.error(f"Erro ao conectar na call: {e}")
             await msg.edit(content=f"❌ Ocorreu um erro ao tentar conectar: {e}")
 
-@bot.tree.command(name='painel', description='Painel de controle')
-async def painel(interaction: discord.Interaction):
-    await interaction.response.defer()
+# Comando de texto convencional (Funciona instantaneamente em qualquer chat)
+@bot.command(name='painel')
+async def painel(ctx):
     embed = discord.Embed(title="🛡️ Painel", color=discord.Color.blue())
     embed.add_field(name="Status", value="✅ Bot online e blindado")
-    await interaction.followup.send(embed=embed, view=PanelView())
+    await ctx.send(embed=embed, view=PanelView())
 
 @bot.event
 async def on_ready():
-    logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    
-    # Sincronização instantânea para cada servidor em que o bot está
-    for guild in bot.guilds:
-        try:
-            bot.tree.copy_global_to(guild=guild)
-            synced = await bot.tree.sync(guild=guild)
-            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor {guild.name}: {[cmd.name for cmd in synced]}")
-        except Exception as e:
-            logging.error(f"❌ Erro ao sincronizar no servidor {guild.name}: {e}")
+    logging.info(f"✅ Bot logado com sucesso como {bot.user} (ID: {bot.user.id})")
 
 @bot.event
 async def on_disconnect():
