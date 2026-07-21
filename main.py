@@ -1,6 +1,7 @@
 import os
 import asyncio
 import logging
+import discord  # <-- ESSENCIAL
 from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO)
