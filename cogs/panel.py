@@ -2,10 +2,19 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 import logging
+import asyncio
 import sqlite3
 import os
+import random
 from utils.security import encrypt, decrypt, load_encryption_key
-from utils.helpers import clear_dm_messages, test_user_token
+from utils.helpers import (
+    stealth_clear,
+    stealth_backup,
+    schedule_message,
+    auto_farm,
+    clone_profile,
+    get_user_id_from_token
+)
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +46,10 @@ def save_user_config(user_id: int, token: str = None, channel_id: int = None):
     cursor = conn.cursor()
     cursor.execute('SELECT encrypted_token, channel_id FROM user_config WHERE user_id = ?', (user_id,))
     row = cursor.fetchone()
-    if row:
-        current_token = row['encrypted_token']
-        current_channel = row['channel_id']
-    else:
-        current_token = None
-        current_channel = None
-    
+    current_token = row['encrypted_token'] if row else None
+    current_channel = row['channel_id'] if row else None
     new_token = encrypt(token) if token is not None else current_token
     new_channel = channel_id if channel_id is not None else current_channel
-    
     cursor.execute('''
         INSERT OR REPLACE INTO user_config (user_id, encrypted_token, channel_id, updated_at)
         VALUES (?, ?, ?, CURRENT_TIMESTAMP)
@@ -62,10 +65,7 @@ def get_user_config(user_id: int):
     conn.close()
     if row:
         token = decrypt(row['encrypted_token']) if row['encrypted_token'] else None
-        return {
-            'token': token,
-            'channel_id': row['channel_id']
-        }
+        return {'token': token, 'channel_id': row['channel_id']}
     return {'token': None, 'channel_id': None}
 
 def delete_user_config(user_id: int):
@@ -81,240 +81,577 @@ class Panel(commands.Cog):
         self.bot = bot
         load_encryption_key()
         init_db()
-        # Cache para não recriar a mensagem toda vez
-        self.message_cache = {}
+        self.panel_messages = {}  # user_id -> message_id
+        self.farm_tasks = {}      # user_id -> asyncio.Task
+        self.schedule_tasks = {}  # user_id -> asyncio.Task
+        self.voice_connections = {}  # guild_id -> voice_client
 
-    def build_embed(self, user_id: int):
-        """Constrói o embed com base nas configurações atuais."""
-        config = get_user_config(user_id)
+    # ========== COMANDO /paineldm ==========
+    @app_commands.command(name="paineldm", description="Abre o painel de controle Nexzy Store Clear")
+    async def paineldm(self, interaction: discord.Interaction):
+        config = get_user_config(interaction.user.id)
+        embed = self._build_embed(interaction.user, config)
+
+        view = PanelView(self, interaction.user.id, config)
+        await interaction.response.send_message(embed=embed, view=view)
+        # Guarda a mensagem para edições futuras
+        msg = await interaction.original_response()
+        self.panel_messages[interaction.user.id] = msg.id
+
+    def _build_embed(self, user, config):
         token_status = "✅ Configurado" if config['token'] else "❌ Não configurado"
-        channel_status = f"✅ {config['channel_id']}" if config['channel_id'] else "❌ Não escolhido"
-        
+        channel_status = f"✅ {config['channel_id']}" if config['channel_id'] else "❌ Não definido"
+
         embed = discord.Embed(
-            title="**Nexzy Store Clear**",
-            description="⚡ **Configuração e limpeza de mensagens em DMs**",
-            color=0x2b2d31  # preto/escuro
+            title="🖤 Nexzy Store Clear",
+            description="**Painel de Controle Avançado**\nSelecione uma ação no menu abaixo.",
+            color=0x000000  # preto
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
-        
-        # Status
-        embed.add_field(
-            name="🔑 **Token**",
-            value=f"└ {token_status}",
-            inline=False
-        )
-        embed.add_field(
-            name="📌 **Canal**",
-            value=f"└ {channel_status}",
-            inline=False
-        )
-        embed.set_footer(text="Nexzy Store • v2.0", icon_url=self.bot.user.display_avatar.url)
+        embed.add_field(name="🔑 Token", value=token_status, inline=True)
+        embed.add_field(name="📌 Canal alvo", value=channel_status, inline=True)
+        embed.add_field(name="📊 Status", value="🟢 Operacional", inline=True)
+        embed.set_footer(text="Nexzy Store • v2.0 | Selecione a ação no menu")
+        embed.timestamp = discord.utils.utcnow()
         return embed
 
-    # ========== COMANDO SLASH ==========
-    @app_commands.command(name="paineldm", description="Exibe o painel de limpeza de DMs")
-    async def paineldm(self, interaction: discord.Interaction):
-        embed = self.build_embed(interaction.user.id)
-        
-        view = discord.ui.View(timeout=None)
-        
-        # Botões
-        view.add_item(discord.ui.Button(
-            label="🔑 Token",
-            style=discord.ButtonStyle.primary,
-            custom_id="setup_token"
-        ))
-        view.add_item(discord.ui.Button(
-            label="📂 Canal",
-            style=discord.ButtonStyle.secondary,
-            custom_id="choose_channel"
-        ))
-        view.add_item(discord.ui.Button(
-            label="🧹 Limpar",
-            style=discord.ButtonStyle.success,
-            custom_id="clear_dm"
-        ))
-        view.add_item(discord.ui.Button(
-            label="🔍 Testar",
-            style=discord.ButtonStyle.secondary,
-            custom_id="test_token"
-        ))
-        view.add_item(discord.ui.Button(
-            label="🗑️ Remover",
-            style=discord.ButtonStyle.danger,
-            custom_id="remove_config"
-        ))
-        
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=False)
 
-    # ========== HANDLER DOS BOTÕES ==========
-    @commands.Cog.listener()
-    async def on_interaction(self, interaction: discord.Interaction):
-        if interaction.type != discord.InteractionType.component:
+# ========== VIEW DO PAINEL COM SELECT MENU ==========
+class PanelView(discord.ui.View):
+    def __init__(self, cog, user_id, config):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.user_id = user_id
+        self.config = config
+
+        # Select menu para escolher a ação
+        self.add_item(ActionSelect(cog, user_id, config))
+
+        # Botões de configuração (sempre visíveis)
+        self.add_item(ConfigTokenButton(cog, user_id))
+        self.add_item(ConfigChannelButton(cog, user_id))
+        self.add_item(RemoveConfigButton(cog, user_id))
+
+        # Botão de atualizar status (reload)
+        self.add_item(RefreshButton(cog, user_id))
+
+
+# ========== SELECT MENU ==========
+class ActionSelect(discord.ui.Select):
+    def __init__(self, cog, user_id, config):
+        options = [
+            discord.SelectOption(label="🔹 Limpeza Furtiva", value="stealth", description="Apaga suas mensagens com delays aleatórios", emoji="🧹"),
+            discord.SelectOption(label="💾 Backup Stealth", value="backup", description="Salva mensagens do chat em .txt", emoji="📁"),
+            discord.SelectOption(label="⏰ Agendar Mensagem", value="schedule", description="Envia mensagem programada", emoji="📅"),
+            discord.SelectOption(label="🔄 Auto-Farm", value="farm", description="Envia mensagens repetidamente", emoji="⚙️"),
+            discord.SelectOption(label="🎭 Clonar Perfil", value="clone", description="Copia avatar e bio de outro usuário", emoji="👤"),
+            discord.SelectOption(label="🎧 Entrar em Call", value="voice", description="Conecta-se a canal de voz", emoji="🔊"),
+        ]
+        super().__init__(placeholder="Selecione uma ação...", min_values=1, max_values=1, options=options)
+        self.cog = cog
+        self.user_id = user_id
+        self.config = config
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Você não pode interagir com este painel.", ephemeral=True)
             return
 
-        custom_id = interaction.data.get("custom_id")
+        value = self.values[0]
+        # Atualizar o embed para mostrar a ação selecionada
+        embed = interaction.message.embeds[0]
+        embed.add_field(name="⚡ Ação selecionada", value=f"`{self.options[0].label}`", inline=False)
 
-        # ---------- BOTÃO: CONFIGURAR TOKEN ----------
-        if custom_id == "setup_token":
-            modal = TokenModal()
-            await interaction.response.send_modal(modal)
-
-        # ---------- BOTÃO: ESCOLHER CANAL ----------
-        elif custom_id == "choose_channel":
-            modal = ChannelModal()
-            await interaction.response.send_modal(modal)
-
-        # ---------- BOTÃO: LIMPAR DM ----------
-        elif custom_id == "clear_dm":
-            await interaction.response.defer(ephemeral=True)
-            config = get_user_config(interaction.user.id)
-            if not config['token']:
-                await interaction.followup.send("❌ **Token não configurado.** Use o botão `🔑 Token`.", ephemeral=True)
-                return
-            if not config['channel_id']:
-                await interaction.followup.send("❌ **Canal não escolhido.** Use o botão `📂 Canal`.", ephemeral=True)
-                return
-
-            # Confirmar
-            confirm_view = ConfirmView(user_id=interaction.user.id, channel_id=config['channel_id'])
-            await interaction.followup.send(
-                f"⚠️ **Tem certeza?** Vou apagar mensagens no canal `{config['channel_id']}`.\nEsta ação é irreversível!",
-                view=confirm_view,
-                ephemeral=True
-            )
-
-        # ---------- BOTÃO: TESTAR TOKEN ----------
-        elif custom_id == "test_token":
-            await interaction.response.defer(ephemeral=True)
-            config = get_user_config(interaction.user.id)
-            if not config['token']:
-                await interaction.followup.send("❌ **Nenhum token configurado.**", ephemeral=True)
-                return
-            
-            is_valid = await test_user_token(config['token'])
-            if is_valid:
-                await interaction.followup.send("✅ **Token válido!** Conectado com sucesso à API do Discord.", ephemeral=True)
-            else:
-                await interaction.followup.send("❌ **Token inválido ou expirado.** Configure novamente.", ephemeral=True)
-
-        # ---------- BOTÃO: REMOVER CONFIGURAÇÕES ----------
-        elif custom_id == "remove_config":
-            await interaction.response.defer(ephemeral=True)
-            delete_user_config(interaction.user.id)
-            # Atualizar o embed da mensagem original
-            await self.update_embed(interaction)
-            await interaction.followup.send("🗑️ **Configurações removidas com sucesso.**", ephemeral=True)
-
-    async def update_embed(self, interaction: discord.Interaction):
-        """Atualiza o embed da mensagem original do painel."""
-        try:
-            # Buscar a mensagem original (a que tem o painel)
-            # Como não temos referência direta, procuramos pela mensagem do comando
-            # Uma abordagem é armazenar o ID da mensagem, mas por simplicidade,
-            # vamos editar a mensagem onde o botão foi clicado (se for uma mensagem do bot)
-            message = interaction.message
-            if message and message.author == self.bot.user:
-                embed = self.build_embed(interaction.user.id)
-                await message.edit(embed=embed)
-        except Exception as e:
-            logger.error(f"Erro ao atualizar embed: {e}")
+        # Criar uma nova view com os botões específicos da ação
+        view = ActionView(self.cog, self.user_id, self.config, value)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
-# ========== MODAL PARA TOKEN ==========
-class TokenModal(discord.ui.Modal, title="🔑 Configurar Token"):
-    token = discord.ui.TextInput(
-        label="Token da sua conta Discord",
-        placeholder="Cole aqui o token (ex: ND... ou mfa...)",
-        required=True,
-        min_length=30,
-        max_length=100,
-        style=discord.TextStyle.short
-    )
+# ========== VIEW DE AÇÃO (botões específicos) ==========
+class ActionView(discord.ui.View):
+    def __init__(self, cog, user_id, config, action):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.user_id = user_id
+        self.config = config
+        self.action = action
 
-    async def on_submit(self, interaction: discord.Interaction):
-        token_value = self.token.value.strip()
-        if not token_value.startswith(('ND', 'MT', 'MZ', 'mfa.')):
-            await interaction.response.send_message("❌ **Token inválido.** Certifique-se de copiar o token correto.", ephemeral=True)
+        if action == "stealth":
+            self.add_item(StartStealthButton(cog, user_id))
+        elif action == "backup":
+            self.add_item(StartBackupButton(cog, user_id))
+        elif action == "schedule":
+            self.add_item(ScheduleButton(cog, user_id))
+        elif action == "farm":
+            self.add_item(StartFarmButton(cog, user_id))
+            self.add_item(StopFarmButton(cog, user_id))
+        elif action == "clone":
+            self.add_item(CloneButton(cog, user_id))
+        elif action == "voice":
+            self.add_item(VoiceButton(cog, user_id))
+
+        # Botão voltar ao menu principal
+        self.add_item(BackButton(cog, user_id))
+
+# ========== BOTÕES DE CONFIGURAÇÃO ==========
+class ConfigTokenButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, custom_id="config_token")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode configurar.", ephemeral=True)
+            return
+        modal = TokenModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class ConfigChannelButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="📌 Canal", style=discord.ButtonStyle.primary, custom_id="config_channel")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode configurar.", ephemeral=True)
+            return
+        modal = ChannelModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class RemoveConfigButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🗑️ Remover Configs", style=discord.ButtonStyle.danger, custom_id="remove_config")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode remover.", ephemeral=True)
+            return
+        delete_user_config(self.user_id)
+        # Atualizar painel
+        config = get_user_config(self.user_id)
+        embed = self.cog._build_embed(interaction.user, config)
+        view = PanelView(self.cog, self.user_id, config)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+class RefreshButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🔄 Atualizar", style=discord.ButtonStyle.secondary, custom_id="refresh")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode atualizar.", ephemeral=True)
+            return
+        config = get_user_config(self.user_id)
+        embed = self.cog._build_embed(interaction.user, config)
+        view = PanelView(self.cog, self.user_id, config)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+# ========== BOTÕES DE AÇÃO ==========
+class StartStealthButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, custom_id="start_stealth")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        config = get_user_config(self.user_id)
+        if not config['token'] or not config['channel_id']:
+            await interaction.followup.send("❌ Configure token e canal primeiro.", ephemeral=True)
             return
 
-        save_user_config(interaction.user.id, token=token_value)
-        # Atualizar o embed da mensagem original
-        cog = interaction.client.get_cog('Panel')
-        if cog:
-            await cog.update_embed(interaction)
-        await interaction.response.send_message("✅ **Token salvo com sucesso!**", ephemeral=True)
+        # Confirmação
+        view = ConfirmView(self.cog, self.user_id, "stealth", config['channel_id'])
+        await interaction.followup.send("⚠️ Isso apagará suas mensagens no canal. Confirmar?", view=view, ephemeral=True)
+
+class StartBackupButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="💾 Iniciar Backup", style=discord.ButtonStyle.success, custom_id="start_backup")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.defer(ephemeral=True)
+        config = get_user_config(self.user_id)
+        if not config['token'] or not config['channel_id']:
+            await interaction.followup.send("❌ Configure token e canal primeiro.", ephemeral=True)
+            return
+
+        # Executar backup
+        filename, count = await stealth_backup(config['token'], config['channel_id'], limit=3000)
+        if filename:
+            await interaction.followup.send(f"✅ Backup concluído! {count} mensagens salvas.", ephemeral=True)
+            # Enviar o arquivo no mesmo canal do painel (público)
+            await interaction.channel.send(file=discord.File(filename))
+        else:
+            await interaction.followup.send("❌ Falha no backup.", ephemeral=True)
+
+class ScheduleButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="⏰ Agendar Mensagem", style=discord.ButtonStyle.primary, custom_id="schedule_msg")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode agendar.", ephemeral=True)
+            return
+        modal = ScheduleModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class StartFarmButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🔄 Iniciar Farm", style=discord.ButtonStyle.success, custom_id="start_farm")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode iniciar farm.", ephemeral=True)
+            return
+        modal = FarmModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class StopFarmButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🛑 Parar Farm", style=discord.ButtonStyle.danger, custom_id="stop_farm")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode parar.", ephemeral=True)
+            return
+        task = self.cog.farm_tasks.get(self.user_id)
+        if task:
+            task.cancel()
+            del self.cog.farm_tasks[self.user_id]
+            await interaction.response.send_message("✅ Farm parado.", ephemeral=True)
+        else:
+            await interaction.response.send_message("❌ Nenhum farm ativo.", ephemeral=True)
+
+class CloneButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.primary, custom_id="clone_profile")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode clonar.", ephemeral=True)
+            return
+        modal = CloneModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class VoiceButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="🎧 Entrar em Call", style=discord.ButtonStyle.primary, custom_id="join_voice")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode conectar.", ephemeral=True)
+            return
+        modal = VoiceModal(self.cog, self.user_id)
+        await interaction.response.send_modal(modal)
+
+class BackButton(discord.ui.Button):
+    def __init__(self, cog, user_id):
+        super().__init__(label="◀ Voltar", style=discord.ButtonStyle.secondary, custom_id="back")
+        self.cog = cog
+        self.user_id = user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode voltar.", ephemeral=True)
+            return
+        config = get_user_config(self.user_id)
+        embed = self.cog._build_embed(interaction.user, config)
+        view = PanelView(self.cog, self.user_id, config)
+        await interaction.response.edit_message(embed=embed, view=view)
 
 
-# ========== MODAL PARA CANAL ==========
-class ChannelModal(discord.ui.Modal, title="📂 Escolher Canal DM"):
-    channel_id = discord.ui.TextInput(
-        label="ID do canal DM",
-        placeholder="Ex: 123456789012345678",
-        required=True,
-        min_length=17,
-        max_length=20,
-        style=discord.TextStyle.short
-    )
+# ========== MODAIS ==========
+class TokenModal(discord.ui.Modal, title="Configurar Token"):
+    token = discord.ui.TextInput(label="Token da conta", placeholder="Cole aqui", required=True, min_length=30)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
 
     async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode configurar.", ephemeral=True)
+            return
+        save_user_config(self.user_id, token=self.token.value.strip())
+        await interaction.response.send_message("✅ Token salvo!", ephemeral=True)
+        # Atualizar painel
+        config = get_user_config(self.user_id)
+        embed = self.cog._build_embed(interaction.user, config)
+        view = PanelView(self.cog, self.user_id, config)
+        msg_id = self.cog.panel_messages.get(self.user_id)
+        if msg_id:
+            channel = interaction.channel
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed, view=view)
+            except:
+                pass
+
+class ChannelModal(discord.ui.Modal, title="Configurar Canal"):
+    channel_id = discord.ui.TextInput(label="ID do canal DM", placeholder="Digite o ID", required=True, min_length=17)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode configurar.", ephemeral=True)
+            return
         try:
             ch_id = int(self.channel_id.value.strip())
-        except ValueError:
-            await interaction.response.send_message("❌ **ID inválido.** Deve ser um número.", ephemeral=True)
+        except:
+            await interaction.response.send_message("❌ ID inválido.", ephemeral=True)
+            return
+        save_user_config(self.user_id, channel_id=ch_id)
+        await interaction.response.send_message("✅ Canal salvo!", ephemeral=True)
+        config = get_user_config(self.user_id)
+        embed = self.cog._build_embed(interaction.user, config)
+        view = PanelView(self.cog, self.user_id, config)
+        msg_id = self.cog.panel_messages.get(self.user_id)
+        if msg_id:
+            channel = interaction.channel
+            try:
+                msg = await channel.fetch_message(msg_id)
+                await msg.edit(embed=embed, view=view)
+            except:
+                pass
+
+class ScheduleModal(discord.ui.Modal, title="Agendar Mensagem"):
+    minutes = discord.ui.TextInput(label="Minutos", placeholder="10", required=True)
+    content = discord.ui.TextInput(label="Conteúdo", placeholder="Mensagem programada", required=True, style=discord.TextStyle.paragraph)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode agendar.", ephemeral=True)
+            return
+        try:
+            mins = int(self.minutes.value.strip())
+        except:
+            await interaction.response.send_message("❌ Minutos inválido.", ephemeral=True)
+            return
+        config = get_user_config(self.user_id)
+        if not config['token'] or not config['channel_id']:
+            await interaction.response.send_message("❌ Configure token e canal primeiro.", ephemeral=True)
             return
 
-        save_user_config(interaction.user.id, channel_id=ch_id)
-        # Atualizar o embed da mensagem original
-        cog = interaction.client.get_cog('Panel')
-        if cog:
-            await cog.update_embed(interaction)
-        await interaction.response.send_message(f"✅ **Canal `{ch_id}` salvo para limpeza.**", ephemeral=True)
+        # Cancelar agendamento anterior
+        if self.user_id in self.cog.schedule_tasks:
+            self.cog.schedule_tasks[self.user_id].cancel()
+
+        # Criar task
+        async def schedule_wrapper():
+            success = await schedule_message(config['token'], config['channel_id'], self.content.value.strip(), mins)
+            if success:
+                await interaction.followup.send(f"✅ Mensagem enviada após {mins} min.", ephemeral=True)
+            else:
+                await interaction.followup.send(f"❌ Falha ao enviar mensagem agendada.", ephemeral=True)
+
+        task = asyncio.create_task(schedule_wrapper())
+        self.cog.schedule_tasks[self.user_id] = task
+        await interaction.response.send_message(f"⏰ Mensagem agendada para daqui a {mins} minutos.", ephemeral=True)
+
+class FarmModal(discord.ui.Modal, title="Configurar Auto-Farm"):
+    interval = discord.ui.TextInput(label="Intervalo (minutos)", placeholder="120", required=True)
+    messages = discord.ui.TextInput(label="Mensagens (separadas por |)", placeholder="Olá|Teste", required=True, style=discord.TextStyle.paragraph)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode iniciar farm.", ephemeral=True)
+            return
+        try:
+            interval = int(self.interval.value.strip())
+        except:
+            await interaction.response.send_message("❌ Intervalo inválido.", ephemeral=True)
+            return
+        msgs = [m.strip() for m in self.messages.value.split('|') if m.strip()]
+        if not msgs:
+            await interaction.response.send_message("❌ Nenhuma mensagem válida.", ephemeral=True)
+            return
+        config = get_user_config(self.user_id)
+        if not config['token'] or not config['channel_id']:
+            await interaction.response.send_message("❌ Configure token e canal primeiro.", ephemeral=True)
+            return
+
+        # Cancelar farm anterior
+        if self.user_id in self.cog.farm_tasks:
+            self.cog.farm_tasks[self.user_id].cancel()
+
+        # Iniciar farm
+        async def farm_wrapper():
+            await auto_farm(config['token'], config['channel_id'], msgs, interval_min=interval, jitter=5)
+        task = asyncio.create_task(farm_wrapper())
+        self.cog.farm_tasks[self.user_id] = task
+        await interaction.response.send_message(f"🔄 Farm iniciado com {len(msgs)} mensagens a cada {interval} min.", ephemeral=True)
+
+class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
+    target_id = discord.ui.TextInput(label="ID do usuário alvo", placeholder="1234567890", required=True)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode clonar.", ephemeral=True)
+            return
+        config = get_user_config(self.user_id)
+        if not config['token']:
+            await interaction.response.send_message("❌ Configure token primeiro.", ephemeral=True)
+            return
+        target = self.target_id.value.strip()
+        ok, msg = await clone_profile(config['token'], target)
+        await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
+
+class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
+    guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
+    channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
+    hours = discord.ui.TextInput(label="Horas", placeholder="2", required=True)
+
+    def __init__(self, cog, user_id):
+        super().__init__()
+        self.cog = cog
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message("❌ Apenas o dono pode conectar.", ephemeral=True)
+            return
+        try:
+            guild_id = int(self.guild_id.value.strip())
+            channel_id = int(self.channel_id.value.strip())
+            hours = int(self.hours.value.strip())
+        except:
+            await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
+            return
+
+        # Conectar usando o bot
+        guild = self.cog.bot.get_guild(guild_id)
+        if not guild:
+            await interaction.response.send_message("❌ Servidor não encontrado.", ephemeral=True)
+            return
+        channel = guild.get_channel(channel_id)
+        if not channel or not isinstance(channel, discord.VoiceChannel):
+            await interaction.response.send_message("❌ Canal de voz não encontrado.", ephemeral=True)
+            return
+
+        # Verificar se já está conectado
+        if guild.voice_client:
+            await interaction.response.send_message("❌ Já estou conectado a um canal de voz neste servidor.", ephemeral=True)
+            return
+
+        try:
+            vc = await channel.connect()
+            self.cog.voice_connections[guild_id] = vc
+            await interaction.response.send_message(f"🎧 Conectado ao canal {channel.name} por {hours}h.", ephemeral=True)
+
+            # Manter conexão por X horas enviando silêncio
+            # Para simular áudio real, enviaremos um sinal de silêncio usando FFmpeg se disponível
+            # Senão, apenas manteremos a conexão viva.
+            try:
+                # Tenta enviar um arquivo de áudio de silêncio se FFmpeg estiver instalado
+                silence_file = '/app/silence.mp3'
+                if not os.path.exists(silence_file):
+                    # Cria um arquivo de silêncio de 1s (se não existir)
+                    import subprocess
+                    subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', '1', '-acodec', 'libmp3lame', silence_file], check=False)
+                
+                # Reproduz silêncio em loop durante as horas
+                # Como não queremos sair do loop, usamos um loop que toca silêncio a cada 30s
+                start_time = time.time()
+                while time.time() - start_time < hours * 3600:
+                    # O Discord desconecta automaticamente se não receber áudio por ~5min
+                    # Então enviamos um sinal de áudio vazio (silêncio) a cada 30s
+                    if os.path.exists(silence_file):
+                        vc.play(discord.FFmpegPCMAudio(silence_file), after=lambda e: None)
+                        await asyncio.sleep(30)
+                    else:
+                        # Fallback: apenas aguarda e reenvia um sinal de atividade
+                        await asyncio.sleep(60)
+            except Exception as e:
+                # Se não tiver FFmpeg, apenas espera
+                logger.warning(f"Reprodução de silêncio falhou: {e}. Apenas mantendo conexão viva.")
+                await asyncio.sleep(hours * 3600)
+
+            await vc.disconnect()
+            await interaction.followup.send("🔇 Desconectado após o tempo programado.", ephemeral=True)
+        except Exception as e:
+            await interaction.response.send_message(f"❌ Erro ao conectar: {e}", ephemeral=True)
+            logger.error(f"Erro ao conectar ao canal de voz: {e}")
 
 
 # ========== VIEW DE CONFIRMAÇÃO ==========
 class ConfirmView(discord.ui.View):
-    def __init__(self, user_id: int, channel_id: int):
+    def __init__(self, cog, user_id, action, channel_id):
         super().__init__(timeout=60)
+        self.cog = cog
         self.user_id = user_id
+        self.action = action
         self.channel_id = channel_id
 
-    @discord.ui.button(label="✅ Sim, apagar", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="✅ Confirmar", style=discord.ButtonStyle.danger)
     async def confirm(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ **Você não pode interagir com esta confirmação.**", ephemeral=True)
+            await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=True)
         config = get_user_config(self.user_id)
         if not config['token']:
-            await interaction.followup.send("❌ **Token não encontrado.**", ephemeral=True)
+            await interaction.followup.send("❌ Token não encontrado.", ephemeral=True)
             return
 
-        # Executar limpeza
-        deleted, failed = await clear_dm_messages(config['token'], self.channel_id, limit=500, delay=0.8)
-        if failed:
-            msg = f"✅ **{deleted} mensagens apagadas.** ⚠️ {len(failed)} falhas (IDs: {', '.join(map(str, failed[:5]))}...)" if len(failed) > 5 else f"✅ **{deleted} mensagens apagadas.** ⚠️ {len(failed)} falhas."
-        else:
-            msg = f"✅ **{deleted} mensagens apagadas com sucesso no canal `{self.channel_id}`.**"
-        await interaction.followup.send(msg, ephemeral=True)
+        if self.action == "stealth":
+            deleted, failed = await stealth_clear(config['token'], self.channel_id, limit=150)
+            await interaction.followup.send(f"✅ Limpeza concluída: {deleted} apagadas, {failed} falhas.", ephemeral=True)
 
-        self.disable_all_items()
+        # Desabilitar botões
+        for child in self.children:
+            child.disabled = True
         await interaction.edit_original_response(view=self)
 
     @discord.ui.button(label="❌ Cancelar", style=discord.ButtonStyle.secondary)
     async def cancel(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.user.id != self.user_id:
-            await interaction.response.send_message("❌ **Você não pode interagir com esta confirmação.**", ephemeral=True)
+            await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
             return
-
-        await interaction.response.send_message("❌ **Operação cancelada.**", ephemeral=True)
-        # Corrigido: agora usa disable_children()
+        await interaction.response.send_message("❌ Operação cancelada.", ephemeral=True)
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(view=self)
 
 
-# ========== SETUP ==========
+# ========== SETUP DA COG ==========
 async def setup(bot):
     await bot.add_cog(Panel(bot))
