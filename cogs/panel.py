@@ -82,9 +82,8 @@ class Panel(commands.Cog):
         init_db()
         self.farm_tasks = {}
         self.schedule_tasks = {}
-        self.voice_clients = {}  # user_id -> voice_client
+        self.voice_clients = {}
 
-    # ========== COMANDO ==========
     @app_commands.command(name="paineldm", description="Abre o painel de controle")
     async def paineldm(self, interaction: discord.Interaction):
         config = get_user_config(interaction.user.id)
@@ -108,9 +107,7 @@ class Panel(commands.Cog):
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    # ========== FUNÇÃO DE VOZ CORRIGIDA ==========
     async def join_voice(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
-        # A interação já foi deferida no modal
         guild = self.bot.get_guild(guild_id)
         if not guild:
             await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
@@ -125,15 +122,12 @@ class Panel(commands.Cog):
             return
 
         try:
-            # Tenta conectar (requer PyNaCl instalado)
+            # Tentar conectar com timeout
             vc = await channel.connect(timeout=30.0, reconnect=True)
             self.voice_clients[interaction.user.id] = vc
             await interaction.followup.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.", ephemeral=True)
 
-            # Mantém a conexão por X horas
-            # Como não temos áudio, o Discord desconecta após ~5min de inatividade.
-            # Para manter, podemos enviar um stream de silêncio (requer ffmpeg) ou apenas reconectar se cair.
-            # Vamos usar um loop que verifica a conexão a cada 30s e, se cair, tenta reconectar.
+            # Manter conexão por X horas com keepalive
             start_time = asyncio.get_event_loop().time()
             while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
                 await asyncio.sleep(30)
@@ -166,7 +160,6 @@ class PanelView(discord.ui.View):
         self.add_item(RefreshButton(cog, user_id))
 
 
-# ========== SELECT CORRIGIDO ==========
 class ActionSelect(discord.ui.Select):
     def __init__(self, cog, user_id, config):
         options = [
@@ -197,7 +190,6 @@ class ActionSelect(discord.ui.Select):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-# ========== VIEW DE AÇÃO ==========
 class ActionView(discord.ui.View):
     def __init__(self, cog, user_id, config, action):
         super().__init__(timeout=None)
@@ -552,7 +544,6 @@ class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
         ok, msg = await clone_profile(config['token'], self.target_id.value.strip())
         await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
 
-# ========== MODAL DE VOZ CORRIGIDO ==========
 class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
     guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
     channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
@@ -575,10 +566,7 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
             await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
             return
 
-        # Defer imediatamente para evitar expiração (tempo limite de 15s)
         await interaction.response.defer(ephemeral=True, thinking=True)
-
-        # Agora chama a função de voz com a interação já deferida
         await self.cog.join_voice(interaction, gid, cid, hrs)
 
 
