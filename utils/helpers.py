@@ -144,35 +144,38 @@ async def schedule_message(token: str, channel_id: int, content: str, minutes: i
             return resp.status == 200
 
 # ========== AUTO-FARM COM REPETIÇÕES ==========
-async def auto_farm(token: str, channel_id: str, messages: list, interval_seconds: int = 60, repeats: int = 0):
+async def auto_farm(token: str, channel_id: str, messages: list, interval_min: int = 15, jitter: int = 5, repeat_count: int = 0):
     """
-    Envia mensagens repetidamente com intervalo em segundos.
-    Se repeats=0, repete infinitamente.
+    Envia mensagens repetidamente. Se repeat_count > 0, executa exatamente N vezes e para.
+    Caso contrário, executa indefinidamente até ser cancelado.
     """
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    sent = 0
-    total = repeats if repeats > 0 else float('inf')
-
     async with aiohttp.ClientSession() as session:
-        while sent < total:
+        executed = 0
+        while True:
+            # Se repeat_count > 0 e já executou todas, para
+            if repeat_count > 0 and executed >= repeat_count:
+                break
+
             for msg in messages:
-                if sent >= total:
-                    break
                 typing_url = f'https://discord.com/api/v9/channels/{channel_id}/typing'
                 await session.post(typing_url, headers=headers)
-                await asyncio.sleep(random.uniform(1.0, 2.0))
+                await asyncio.sleep(random.uniform(1.0, 2.5))
                 payload = {'content': msg}
                 send_url = f'https://discord.com/api/v9/channels/{channel_id}/messages'
                 async with session.post(send_url, headers=headers, json=payload) as resp:
-                    if resp.status == 200:
-                        sent += 1
-                    else:
-                        logger.warning(f"Falha ao enviar mensagem: {resp.status}")
-                await asyncio.sleep(random.uniform(0.5, 1.5))
-            if sent >= total:
+                    pass
+                await asyncio.sleep(random.uniform(2, 5))
+
+            executed += 1
+            # Se não for indefinido e já terminou, sai
+            if repeat_count > 0 and executed >= repeat_count:
                 break
-            # Aguarda o intervalo antes do próximo ciclo
-            await asyncio.sleep(interval_seconds)
+
+            # Espera o intervalo com jitter
+            base_interval = max(1, interval_min)  # mínimo 1 minuto
+            jitter_seconds = random.randint(0, jitter * 60)
+            await asyncio.sleep(base_interval * 60 + jitter_seconds)
 
 # ========== CLONAR PERFIL ==========
 async def clone_profile(token: str, target_user_id: str):
