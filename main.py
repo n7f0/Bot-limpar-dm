@@ -111,7 +111,6 @@ async def handle_messages(ws, data):
         logging.error(f"Erro ao processar mensagem do painel: {e}")
 
 async def start_discord_gateway():
-    gateway_url = "wss://gateway.gateway.discord.gg/?v=10&encoding=json" rescue_url if needed
     gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
     while True:
