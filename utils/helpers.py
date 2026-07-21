@@ -8,7 +8,6 @@ import base64
 
 logger = logging.getLogger(__name__)
 
-# ========== OBTER ID DO USUÁRIO ==========
 async def get_user_id_from_token(token: str) -> str:
     headers = {'Authorization': token}
     async with aiohttp.ClientSession() as session:
@@ -21,7 +20,6 @@ async def get_user_id_from_token(token: str) -> str:
             pass
     return None
 
-# ========== LIMPEZA FURTIVA ==========
 async def stealth_clear(token: str, channel_id: int, limit: int = 150):
     user_id = await get_user_id_from_token(token)
     if not user_id:
@@ -84,7 +82,6 @@ async def stealth_clear(token: str, channel_id: int, limit: int = 150):
 
     return deleted, failed
 
-# ========== BACKUP STEALTH ==========
 async def stealth_backup(token: str, channel_id: int, limit: int = 3000):
     user_id = await get_user_id_from_token(token)
     if not user_id:
@@ -130,7 +127,6 @@ async def stealth_backup(token: str, channel_id: int, limit: int = 3000):
             f.write(f"[{msg['timestamp']}] {msg['author']['username']}: {msg.get('content', '')}\n")
     return filename, len(messages)
 
-# ========== AGENDAR MENSAGEM ==========
 async def schedule_message(token: str, channel_id: int, content: str, minutes: int):
     await asyncio.sleep(minutes * 60)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
@@ -143,17 +139,11 @@ async def schedule_message(token: str, channel_id: int, content: str, minutes: i
         async with session.post(send_url, headers=headers, json=payload) as resp:
             return resp.status == 200
 
-# ========== AUTO-FARM COM REPETIÇÕES ==========
 async def auto_farm(token: str, channel_id: str, messages: list, interval_min: int = 15, jitter: int = 5, repeat_count: int = 0):
-    """
-    Envia mensagens repetidamente. Se repeat_count > 0, executa exatamente N vezes e para.
-    Caso contrário, executa indefinidamente até ser cancelado.
-    """
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     async with aiohttp.ClientSession() as session:
         executed = 0
         while True:
-            # Se repeat_count > 0 e já executou todas, para
             if repeat_count > 0 and executed >= repeat_count:
                 break
 
@@ -168,16 +158,13 @@ async def auto_farm(token: str, channel_id: str, messages: list, interval_min: i
                 await asyncio.sleep(random.uniform(2, 5))
 
             executed += 1
-            # Se não for indefinido e já terminou, sai
             if repeat_count > 0 and executed >= repeat_count:
                 break
 
-            # Espera o intervalo com jitter
-            base_interval = max(1, interval_min)  # mínimo 1 minuto
+            base_interval = max(1, interval_min)
             jitter_seconds = random.randint(0, jitter * 60)
             await asyncio.sleep(base_interval * 60 + jitter_seconds)
 
-# ========== CLONAR PERFIL ==========
 async def clone_profile(token: str, target_user_id: str):
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     async with aiohttp.ClientSession() as session:
