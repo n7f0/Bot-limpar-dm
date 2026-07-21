@@ -10,13 +10,6 @@ logging.basicConfig(level=logging.INFO)
 TOKEN = os.getenv('BOT_TOKEN')
 session = AsyncSession(impersonate="chrome120")
 
-voice_state_cache = {
-    "guild_id": None,
-    "channel_id": None,
-    "session_id": None,
-    "websocket": None
-}
-
 async def send_heartbeat(ws, interval):
     while True:
         try:
@@ -30,7 +23,7 @@ async def send_identify(ws):
         "op": 2,
         "d": {
             "token": TOKEN,
-            "intents": 33281,  # Intents incluindo mensagens e canais de voz
+            "intents": 33281,
             "properties": {
                 "os": "Windows",
                 "browser": "Chrome",
@@ -41,7 +34,6 @@ async def send_identify(ws):
     await ws.send(json.dumps(payload))
 
 async def handle_messages(ws, data):
-    """Gerencia as mensagens recebidas para responder ao comando /paineldm"""
     try:
         t = data.get("t")
         if t == "MESSAGE_CREATE":
@@ -50,24 +42,66 @@ async def handle_messages(ws, data):
             channel_id = msg.get("channel_id")
             author = msg.get("author", {})
 
-            # Evita responder a si mesmo
             if author.get("id") == "1529128615155994787":
                 return
 
             if content == "/paineldm":
-                # Envia uma requisição HTTP para a API do Discord respondendo no chat
                 url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+                
+                # Tratamento de cabeçalho dependendo se é Bot Token puro ou Bearer/User Token
+                auth_header = TOKEN if TOKEN.startswith("MT") or TOKEN.startswith("Bot ") else f"Bot {TOKEN}"
+                if not auth_header.startswith("Bot ") and not TOKEN.startswith("MT"):
+                    auth_header = f"Bot {TOKEN}"
+
                 headers = {
-                    "Authorization": f"Bot {TOKEN}" if not TOKEN.startswith("MT") else TOKEN,
+                    "Authorization": auth_header,
                     "Content-Type": "application/json"
                 }
+
+                # Criando um Embed rico para o painel aparecer visualmente bonito
                 payload = {
-                    "content": "🛡️ **Painel DM Ativo!**\nPainel de controle de limpeza e gerenciamento pronto para uso via WebSocket."
+                    "embeds": [
+                        {
+                            "title": "🛡️ Painel de Controle - Gerenciamento DM",
+                            "description": "Selecione uma das opções abaixo para gerenciar suas conversas e sistema.",
+                            "color": 5814783,
+                            "fields": [
+                                {"name": "Status do Sistema", "value": "🟢 Conectado via Gateway Direto", "inline": False},
+                                {"name": "ID da Conta", "value": "`1529128615155994787`", "inline": True},
+                                {"name": "Modo", "value": "Estável 24/7", "inline": True}
+                            ],
+                            "footer": {
+                                "text": "Sistema de Controle Automático"
+                            }
+                        }
+                    ],
+                    "components": [
+                        {
+                            "type": 1,
+                            "components": [
+                                {
+                                    "type": 2,
+                                    "style": 1,
+                                    "custom_id": "btn_limpar",
+                                    "label": "🧹 Limpar DMs",
+                                    "disabled": False
+                                },
+                                {
+                                    "type": 2,
+                                    "style": 4,
+                                    "custom_id": "btn_status",
+                                    "label": "📊 Atualizar Status",
+                                    "disabled": False
+                                }
+                            ]
+                        }
+                    ]
                 }
-                await session.post(url, headers=headers, json=payload)
-                logging.info(f"Painel enviado via comando /paineldm no canal {channel_id}")
+
+                response = await session.post(url, headers=headers, json=payload)
+                logging.info(f"Painel visual enviado com sucesso! Status HTTP: {response.status_code}")
     except Exception as e:
-      logging.error(f"Erro ao processar mensagem: {e}")
+        logging.error(f"Erro ao processar mensagem do painel: {e}")
 
 async def start_discord_gateway():
     gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
@@ -76,14 +110,12 @@ async def start_discord_gateway():
         try:
             logging.info("🔌 Conectando ao Gateway do Discord via WebSocket puro...")
             async with websockets.connect(gateway_url) as ws:
-                voice_state_cache["websocket"] = ws
-
                 async for message in ws:
                     data = json.loads(message)
                     op = data.get("op")
                     d = data.get("d", {})
 
-                    if op == 10:  # Hello event
+                    if op == 10:
                         heartbeat_interval = d.get("heartbeat_interval", 41300) / 1000.0
                         asyncio.create_task(send_heartbeat(ws, heartbeat_interval))
                         await send_identify(ws)
@@ -92,7 +124,6 @@ async def start_discord_gateway():
                         user = d.get('user', {})
                         logging.info(f"✅ Conectado com sucesso na API como {user.get('username')} (ID: {user.get('id')})!")
 
-                    # Processa eventos de mensagens em tempo real
                     asyncio.create_task(handle_messages(ws, data))
 
         except Exception as e:
