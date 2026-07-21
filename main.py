@@ -30,7 +30,7 @@ async def send_identify(ws):
         "op": 2,
         "d": {
             "token": TOKEN,
-            "intents": 513,
+            "intents": 33281,  # Intents incluindo mensagens e canais de voz
             "properties": {
                 "os": "Windows",
                 "browser": "Chrome",
@@ -40,16 +40,34 @@ async def send_identify(ws):
     }
     await ws.send(json.dumps(payload))
 
-async def keep_alive_udp_loop():
-    while True:
-        try:
-            await asyncio.sleep(5)
-            if voice_state_cache.get("channel_id"):
-                logging.debug("Keep-alive de voz enviado.")
-        except asyncio.CancelledError:
-            break
-        except Exception:
-            await asyncio.sleep(5)
+async def handle_messages(ws, data):
+    """Gerencia as mensagens recebidas para responder ao comando !painel"""
+    try:
+        t = data.get("t")
+        if t == "MESSAGE_CREATE":
+            msg = data.get("d", {})
+            content = msg.get("content", "")
+            channel_id = msg.get("channel_id")
+            author = msg.get("author", {})
+
+            # Evita responder a si mesmo
+            if author.get("id") == "1529128615155994787":
+                return
+
+            if content == "!painel":
+                # Envia uma requisição HTTP para a API do Discord respondendo no chat
+                url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
+                headers = {
+                    "Authorization": f"Bot {TOKEN}" if not TOKEN.startswith("MT") else TOKEN, # Suporte a token de usuário ou bot
+                    "Content-Type": "application/json"
+                }
+                payload = {
+                    "content": "🛡️ **Painel de Controle Ativo!**\nBot online e conectado via Gateway direto."
+                }
+                await session.post(url, headers=headers, json=payload)
+                logging.info(f"Painel enviado via comando !painel no canal {channel_id}")
+    except Exception as e:
+      logging.error(f"Erro ao processar mensagem: {e}")
 
 async def start_discord_gateway():
     gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
@@ -57,15 +75,12 @@ async def start_discord_gateway():
     while True:
         try:
             logging.info("🔌 Conectando ao Gateway do Discord via WebSocket puro...")
-            # Removido o argumento extra_headers incompatível com esta versão do websockets
             async with websockets.connect(gateway_url) as ws:
                 voice_state_cache["websocket"] = ws
-                asyncio.create_task(keep_alive_udp_loop())
 
                 async for message in ws:
                     data = json.loads(message)
                     op = data.get("op")
-                    t = data.get("t")
                     d = data.get("d", {})
 
                     if op == 10:  # Hello event
@@ -73,12 +88,12 @@ async def start_discord_gateway():
                         asyncio.create_task(send_heartbeat(ws, heartbeat_interval))
                         await send_identify(ws)
 
-                    elif t == "READY":
+                    elif data.get("t") == "READY":
                         user = d.get('user', {})
                         logging.info(f"✅ Conectado com sucesso na API como {user.get('username')} (ID: {user.get('id')})!")
 
-                    elif t == "VOICE_SERVER_UPDATE":
-                        logging.info(f"🎙️ Endpoint de voz recebido com sucesso!")
+                    # Processa eventos de mensagens e rede
+                    asyncio.create_task(handle_messages(ws, data))
 
         except Exception as e:
             logging.error(f"⚠️ Conexão perdida no Gateway: {e}. Reconectando em 5 segundos...")
