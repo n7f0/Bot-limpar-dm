@@ -4,7 +4,6 @@ import os
 import asyncio
 import logging
 
-# Configuração mínima de logging
 logging.basicConfig(level=logging.INFO)
 
 intents = discord.Intents.default()
