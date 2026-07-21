@@ -122,12 +122,10 @@ class Panel(commands.Cog):
             return
 
         try:
-            # Tentar conectar com timeout
             vc = await channel.connect(timeout=30.0, reconnect=True)
             self.voice_clients[interaction.user.id] = vc
             await interaction.followup.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.", ephemeral=True)
 
-            # Manter conexão por X horas com keepalive
             start_time = asyncio.get_event_loop().time()
             while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
                 await asyncio.sleep(30)
@@ -139,20 +137,16 @@ class Panel(commands.Cog):
             if vc.is_connected():
                 await vc.disconnect()
                 await interaction.followup.send("🔇 Desconectado após o tempo programado.", ephemeral=True)
-        except discord.ClientException as e:
-            await interaction.followup.send(f"❌ Erro ao conectar: {e}", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
 
 
-# ========== VIEW DO PAINEL ==========
 class PanelView(discord.ui.View):
     def __init__(self, cog, user_id, config):
         super().__init__(timeout=None)
         self.cog = cog
         self.user_id = user_id
         self.config = config
-
         self.add_item(ActionSelect(cog, user_id, config))
         self.add_item(ConfigTokenButton(cog, user_id))
         self.add_item(ConfigChannelButton(cog, user_id))
@@ -179,13 +173,10 @@ class ActionSelect(discord.ui.Select):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Apenas o dono pode interagir.", ephemeral=True)
             return
-
         value = self.values[0]
         selected_label = next((opt.label for opt in self.options if opt.value == value), value)
-
         embed = interaction.message.embeds[0]
         embed.add_field(name="⚡ Ação selecionada", value=f"`{selected_label}`", inline=False)
-
         view = ActionView(self.cog, self.user_id, self.config, value)
         await interaction.response.edit_message(embed=embed, view=view)
 
@@ -197,7 +188,6 @@ class ActionView(discord.ui.View):
         self.user_id = user_id
         self.config = config
         self.action = action
-
         if action == "stealth":
             self.add_item(StartStealthButton(cog, user_id))
         elif action == "backup":
@@ -211,11 +201,9 @@ class ActionView(discord.ui.View):
             self.add_item(CloneButton(cog, user_id))
         elif action == "voice":
             self.add_item(VoiceButton(cog, user_id))
-
         self.add_item(BackButton(cog, user_id))
 
 
-# ========== BOTÕES DE CONFIG ==========
 class ConfigTokenButton(discord.ui.Button):
     def __init__(self, cog, user_id):
         super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, custom_id="config_token")
@@ -273,8 +261,6 @@ class RefreshButton(discord.ui.Button):
         view = PanelView(self.cog, self.user_id, config)
         await interaction.response.edit_message(embed=embed, view=view)
 
-
-# ========== BOTÕES DE AÇÃO ==========
 class StartStealthButton(discord.ui.Button):
     def __init__(self, cog, user_id):
         super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, custom_id="start_stealth")
@@ -395,7 +381,6 @@ class BackButton(discord.ui.Button):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-# ========== MODAIS ==========
 class TokenModal(discord.ui.Modal, title="Configurar Token"):
     token = discord.ui.TextInput(label="Token", placeholder="Cole aqui", required=True, min_length=30)
 
@@ -461,17 +446,14 @@ class ScheduleModal(discord.ui.Modal, title="Agendar Mensagem"):
         if not config['token'] or not config['channel_id']:
             await interaction.response.send_message("❌ Configure token e canal.", ephemeral=True)
             return
-
         if self.user_id in self.cog.schedule_tasks:
             self.cog.schedule_tasks[self.user_id].cancel()
-
         async def wrapper():
             ok = await schedule_message(config['token'], config['channel_id'], self.content.value.strip(), mins)
             try:
                 await interaction.followup.send(f"✅ Mensagem enviada!" if ok else "❌ Falha ao enviar.", ephemeral=True)
             except:
                 pass
-
         task = asyncio.create_task(wrapper())
         self.cog.schedule_tasks[self.user_id] = task
         await interaction.response.send_message(f"⏰ Agendado para {mins} min.", ephemeral=True)
@@ -504,10 +486,8 @@ class FarmModal(discord.ui.Modal, title="Auto-Farm"):
         if not config['token'] or not config['channel_id']:
             await interaction.response.send_message("❌ Configure token e canal.", ephemeral=True)
             return
-
         if self.user_id in self.cog.farm_tasks:
             self.cog.farm_tasks[self.user_id].cancel()
-
         async def wrapper():
             await auto_farm(config['token'], config['channel_id'], msgs, interval_min=interval, jitter=5, repeat_count=repeat)
             if repeat > 0:
@@ -515,7 +495,6 @@ class FarmModal(discord.ui.Modal, title="Auto-Farm"):
                     await interaction.followup.send(f"✅ Farm finalizado após {repeat} execuções.", ephemeral=True)
                 except:
                     pass
-
         task = asyncio.create_task(wrapper())
         self.cog.farm_tasks[self.user_id] = task
         msg = f"🔄 Farm iniciado com {len(msgs)} mensagens a cada {interval} min."
@@ -565,12 +544,10 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
         except ValueError:
             await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
             return
-
         await interaction.response.defer(ephemeral=True, thinking=True)
         await self.cog.join_voice(interaction, gid, cid, hrs)
 
 
-# ========== CONFIRMAÇÃO ==========
 class ConfirmView(discord.ui.View):
     def __init__(self, cog, user_id, action, channel_id):
         super().__init__(timeout=60)
@@ -589,11 +566,9 @@ class ConfirmView(discord.ui.View):
         if not config['token']:
             await interaction.followup.send("❌ Token não encontrado.", ephemeral=True)
             return
-
         if self.action == "stealth":
             deleted, failed = await stealth_clear(config['token'], self.channel_id, limit=150)
             await interaction.followup.send(f"✅ Limpeza: {deleted} apagadas, {failed} falhas.", ephemeral=True)
-
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(view=self)
@@ -609,6 +584,5 @@ class ConfirmView(discord.ui.View):
         await interaction.edit_original_response(view=self)
 
 
-# ========== SETUP ==========
 async def setup(bot):
     await bot.add_cog(Panel(bot))
