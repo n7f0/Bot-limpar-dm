@@ -15,7 +15,7 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# --- Gerador de Silêncio Contínuo para Evitar Queda na Call ---
+# --- Gerador de Silêncio Contínuo ---
 class SilenceSource(discord.AudioSource):
     def read(self) -> bytes:
         return b'\x00' * 3840
@@ -66,11 +66,15 @@ async def painel(interaction: discord.Interaction):
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"✅ {len(synced)} comando(s) sincronizado(s): {[cmd.name for cmd in synced]}")
-    except Exception as e:
-        logging.error(f"❌ Erro ao sincronizar: {e}")
+    
+    # Sincronização instantânea para cada servidor em que o bot está
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor {guild.name}: {[cmd.name for cmd in synced]}")
+        except Exception as e:
+            logging.error(f"❌ Erro ao sincronizar no servidor {guild.name}: {e}")
 
 @bot.event
 async def on_disconnect():
