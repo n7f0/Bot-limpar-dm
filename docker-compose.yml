@@ -13,4 +13,5 @@ services:
     volumes:
       - ./data:/app/data
       - ./secret.key:/app/secret.key
+#
 
