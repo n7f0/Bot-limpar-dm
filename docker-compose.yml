@@ -10,5 +10,3 @@ services:
       - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
-    # volumes:   # ← remova ou comente esta seção
-    #   - bot_data:/app/data
