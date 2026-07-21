@@ -5,10 +5,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay: float = 0.8):
-    """
-    Apaga mensagens em um canal DM usando token do usuário.
-    Retorna o número de mensagens deletadas.
-    """
+    """Apaga mensagens em um canal DM usando token do usuário."""
     headers = {
         'Authorization': token,
         'Content-Type': 'application/json'
@@ -49,6 +46,10 @@ async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay
                             
                             if del_resp.status == 204:
                                 deleted += 1
+                                logger.debug(f"Apagada mensagem {msg_id}")
+                            elif del_resp.status == 403:
+                                # Mensagem já deletada ou sem permissão, ignora
+                                pass
                             else:
                                 logger.warning(f"Falha ao apagar {msg_id}: {del_resp.status}")
                         
@@ -67,7 +68,6 @@ async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay
     return deleted
 
 async def test_user_token(token: str) -> bool:
-    """Verifica se o token é válido."""
     headers = {'Authorization': token}
     async with aiohttp.ClientSession() as session:
         try:
