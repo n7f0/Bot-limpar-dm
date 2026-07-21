@@ -166,7 +166,7 @@ class VoiceConnection:
 class Panel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_tasks = {}
+        self.active_tasks = {}  # user_id -> evento de cancelamento
 
     @app_commands.command(name='painel', description='Abre o painel de controle completo')
     async def painel(self, interaction: discord.Interaction):
@@ -183,7 +183,10 @@ class Panel(commands.Cog):
         farm_chat_id = user.data.get('farm_chat_id')
         farm_msg = user.data.get('farm_message', '')
         auto_farm = user.data.get('auto_farming', 0)
-        embed = discord.Embed(title="🛡️ Nexzy Pro - Painel", color=discord.Color.blue())
+        embed = discord.Embed(
+            title="🛡️ Nexzy Pro - Painel",
+            color=discord.Color.blue()
+        )
         embed.add_field(name="Tokens", value=f"{len(tokens)} configurados", inline=True)
         embed.add_field(name="Token ativo", value=f"#{default_idx+1}" if tokens else "Nenhum", inline=True)
         embed.add_field(name="Canal (Limpeza/Backup)", value=f"<#{chat_id}>" if chat_id else "Não definido", inline=False)
@@ -193,6 +196,9 @@ class Panel(commands.Cog):
         embed.set_footer(text="Clique nos botões para executar ações")
         return embed
 
+    # ----------------------------------------------------------
+    # MÉTODOS INTERNOS (Clean, Backup, Farm, Call, Clone)
+    # ----------------------------------------------------------
     async def _perform_cleanup(self, user_id, token, chat_id, limit, progress_msg, cancel_event):
         headers = build_headers({"Authorization": token})
         deleted = 0
@@ -271,6 +277,9 @@ class Panel(commands.Cog):
             logger.info(f"Farm cancelado para {user_id}")
             raise
 
+    # ============================================================
+    # FUNÇÃO PERFORM_CALL CORRIGIDA (COM HEARTBEAT E ESTABILIDADE)
+    # ============================================================
     async def _perform_call(self, user_id, token, channel_id, hours, progress_msg):
         headers = build_headers({"Authorization": token})
         async with aiohttp.ClientSession() as aio_session:
@@ -280,7 +289,9 @@ class Panel(commands.Cog):
                         raise Exception("Gateway API failed")
                     gw_data = await resp_gw.json()
                     gateway_url = gw_data['url'] + "?v=10&encoding=json"
-            except Exception:
+                    logger.info(f"[Voice] Gateway URL obtido: {gateway_url}")
+            except Exception as e:
+                logger.warning(f"[Voice] Erro ao obter gateway: {e}, usando fallback")
                 gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
             resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
@@ -293,9 +304,17 @@ class Panel(commands.Cog):
                 await progress_msg.edit(content="❌ Canal não pertence a um servidor de voz.")
                 return
 
-            voice_ws = await aio_session.ws_connect(gateway_url)
+            try:
+                voice_ws = await aio_session.ws_connect(gateway_url, heartbeat=30.0)
+                logger.info("[Voice] WebSocket de voz conectado")
+            except Exception as e:
+                logger.error(f"[Voice] Erro ao conectar WS: {e}")
+                await progress_msg.edit(content=f"❌ Erro ao conectar ao gateway: {e}")
+                return
+
             try:
                 hello = await voice_ws.receive_json()
+                logger.info("[Voice] Hello recebido do voice WS")
                 await voice_ws.send_json({
                     "op": 2,
                     "d": {
@@ -303,10 +322,14 @@ class Panel(commands.Cog):
                         "properties": fingerprint_mgr.get(vary=False)
                     }
                 })
+                # Aguarda ready (op:0)
                 while True:
                     msg = await voice_ws.receive_json()
                     if msg.get('op') == 0:
+                        logger.info("[Voice] Ready recebido")
                         break
+                    else:
+                        logger.debug(f"[Voice] Ignorando op {msg.get('op')} antes do ready")
 
                 await voice_ws.send_json({
                     "op": 4,
@@ -317,6 +340,7 @@ class Panel(commands.Cog):
                         "self_deaf": True
                     }
                 })
+                logger.info("[Voice] Enviado op:4 para entrar na call")
 
                 voice = VoiceConnection(user_id, voice_ws, token)
                 if not await voice.start():
@@ -325,32 +349,52 @@ class Panel(commands.Cog):
                     return
 
                 await progress_msg.edit(content=f"✅ Na call por {hours}h")
+                logger.info(f"📞 Usuário {user_id} entrou na call por {hours}h")
+
                 end_time = time.time() + (hours * 3600)
+                last_log = time.time()
+
                 while time.time() < end_time:
+                    if time.time() - last_log > 60:
+                        remaining = max(0, int((end_time - time.time()) / 60))
+                        await progress_msg.edit(content=f"🎧 Na call – faltam `{remaining}` minutos.")
+                        last_log = time.time()
+
                     try:
                         msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
                         if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                            logger.warning(f"WebSocket de voz fechado para {user_id}")
                             break
                     except asyncio.TimeoutError:
+                        # Envia heartbeat para manter a conexão
                         try:
                             await voice_ws.send_json({"op": 1, "d": None})
-                        except:
+                        except Exception as e:
+                            logger.warning(f"Erro ao enviar heartbeat: {e}")
                             break
-                    except:
+                    except Exception as e:
+                        logger.error(f"Erro no loop de voz: {e}")
                         break
-                    await asyncio.sleep(1)
+
+                    await asyncio.sleep(1.0)
+
                 voice.stop()
                 await voice_ws.close()
                 await progress_msg.edit(content="⏹️ Call encerrada.")
+                logger.info(f"📞 Usuário {user_id} saiu da call.")
+
             except asyncio.CancelledError:
                 voice.stop()
                 await voice_ws.close()
                 await progress_msg.edit(content="⏹️ Call interrompida.")
                 raise
             except Exception as e:
-                logger.error(f"Erro na call: {e}")
+                logger.error(f"Erro geral na voz: {e}", exc_info=True)
                 await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
-                await voice_ws.close()
+                try:
+                    await voice_ws.close()
+                except:
+                    pass
 
     async def _perform_clone(self, user_id, token, target_id, progress_msg):
         headers = build_headers({"Authorization": token})
