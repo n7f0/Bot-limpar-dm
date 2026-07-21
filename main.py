@@ -12,7 +12,7 @@ intents.message_content = True
 intents.guilds = True
 intents.voice_states = True
 
-# Usando o prefixo '!' para comandos de chat comuns (Perfeito para Self-Bots)
+# Mantém o prefixo '!'
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Gerador de Silêncio Contínuo ---
@@ -56,9 +56,9 @@ class PanelView(discord.ui.View):
             logging.error(f"Erro ao conectar na call: {e}")
             await msg.edit(content=f"❌ Ocorreu um erro ao tentar conectar: {e}")
 
-# Comando de texto convencional (Funciona instantaneamente em qualquer chat)
-@bot.command(name='painel')
-async def painel(ctx):
+# Comando alterado para '!meupainel' para evitar conflito com o outro bot
+@bot.command(name='meupainel')
+async def meupainel(ctx):
     embed = discord.Embed(title="🛡️ Painel", color=discord.Color.blue())
     embed.add_field(name="Status", value="✅ Bot online e blindado")
     await ctx.send(embed=embed, view=PanelView())
