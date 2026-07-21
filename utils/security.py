@@ -1,4 +1,5 @@
 import os
+import shutil
 from cryptography.fernet import Fernet
 
 ENCRYPTION_KEY = None
@@ -8,13 +9,16 @@ def load_encryption_key():
     key = os.getenv('ENCRYPTION_KEY')
     if not key:
         key_file = '/app/secret.key'
-        if os.path.exists(key_file):
-            with open(key_file, 'r') as f:
-                key = f.read().strip()
-        else:
+        # Se for um diretório, remove e cria arquivo
+        if os.path.isdir(key_file):
+            shutil.rmtree(key_file)
+        if not os.path.exists(key_file):
             key = Fernet.generate_key().decode()
             with open(key_file, 'w') as f:
                 f.write(key)
+        else:
+            with open(key_file, 'r') as f:
+                key = f.read().strip()
     ENCRYPTION_KEY = key.encode()
 
 def encrypt(text: str) -> str:
