@@ -5,13 +5,17 @@ import logging
 logger = logging.getLogger(__name__)
 
 async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay: float = 0.8):
-    """Apaga mensagens em um canal DM usando token do usuário."""
+    """
+    Apaga mensagens em um canal DM usando token do usuário.
+    Retorna o número de mensagens deletadas e uma lista de IDs que falharam.
+    """
     headers = {
         'Authorization': token,
         'Content-Type': 'application/json'
     }
     
     deleted = 0
+    failed_ids = []
     async with aiohttp.ClientSession() as session:
         url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100'
         
@@ -46,11 +50,8 @@ async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay
                             
                             if del_resp.status == 204:
                                 deleted += 1
-                                logger.debug(f"Apagada mensagem {msg_id}")
-                            elif del_resp.status == 403:
-                                # Mensagem já deletada ou sem permissão, ignora
-                                pass
                             else:
+                                failed_ids.append(msg_id)
                                 logger.warning(f"Falha ao apagar {msg_id}: {del_resp.status}")
                         
                         await asyncio.sleep(delay)
@@ -65,9 +66,10 @@ async def clear_dm_messages(token: str, channel_id: int, limit: int = 500, delay
                 logger.error(f"Erro na requisição: {e}")
                 break
     
-    return deleted
+    return deleted, failed_ids
 
 async def test_user_token(token: str) -> bool:
+    """Verifica se o token é válido."""
     headers = {'Authorization': token}
     async with aiohttp.ClientSession() as session:
         try:
