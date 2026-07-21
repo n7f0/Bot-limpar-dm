@@ -21,6 +21,11 @@ async def load_extensions():
     except Exception as e:
         logging.error(f"❌ Erro ao carregar cogs.panel: {e}")
 
+# ADICIONADO: Hook de inicialização para garantir que o painel carregue antes da sincronização
+async def setup_hook():
+    await load_extensions()
+bot.setup_hook = setup_hook
+
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
