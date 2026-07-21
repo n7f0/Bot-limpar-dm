@@ -53,17 +53,12 @@ async def keep_alive_udp_loop():
 
 async def start_discord_gateway():
     gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Pragma": "no-cache",
-        "Cache-Control": "no-cache"
-    }
 
     while True:
         try:
             logging.info("🔌 Conectando ao Gateway do Discord via WebSocket puro...")
-            async with websockets.connect(gateway_url, extra_headers=headers) as ws:
+            # Removido o argumento extra_headers incompatível com esta versão do websockets
+            async with websockets.connect(gateway_url) as ws:
                 voice_state_cache["websocket"] = ws
                 asyncio.create_task(keep_alive_udp_loop())
 
