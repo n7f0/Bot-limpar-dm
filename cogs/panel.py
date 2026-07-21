@@ -1,10 +1,19 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-import asyncio
 import logging
 
 logging.basicConfig(level=logging.INFO)
+
+# --- Gerador de Silêncio Contínuo ---
+# Engana o Discord transmitindo áudio vazio (evita timeout por inatividade)
+class SilenceSource(discord.AudioSource):
+    def read(self) -> bytes:
+        # Retorna 3840 bytes de zeros (equivalente a 20ms de áudio PCM em branco)
+        return b'\x00' * 3840
+        
+    def is_opus(self) -> bool:
+        return False
 
 class Panel(commands.Cog):
     def __init__(self, bot):
@@ -21,30 +30,33 @@ class Panel(commands.Cog):
 
 class ButtonCall(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🎧 Entrar na Call", style=discord.ButtonStyle.success)
+        super().__init__(label="🎧 Entrar na Call (Estável)", style=discord.ButtonStyle.success)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
         
-        # Verifica se o usuário que clicou no botão está em um canal de voz
         if not interaction.user.voice or not interaction.user.voice.channel:
-            await interaction.followup.send("❌ Você precisa estar em um canal de voz para eu entrar!", ephemeral=True)
+            await interaction.followup.send("❌ Você precisa estar em um canal de voz!", ephemeral=True)
             return
 
         voice_channel = interaction.user.voice.channel
         msg = await interaction.followup.send(f"🔄 Conectando ao canal: {voice_channel.name}...")
 
         try:
-            # Verifica se o bot já está em alguma call neste servidor para não duplicar conexões
             voice_client = discord.utils.get(interaction.client.voice_clients, guild=interaction.guild)
             
+            # Conecta ou move o bot
             if voice_client and voice_client.is_connected():
                 await voice_client.move_to(voice_channel)
             else:
-                # Estabelece a conexão WebSocket + UDP real
                 voice_client = await voice_channel.connect()
 
-            await msg.edit(content=f"✅ Conectado na call **{voice_channel.name}** com protocolo UDP ativo.")
+            # --- O Segredo está aqui ---
+            # Se o bot não estiver tocando nada, inicia a transmissão infinita de silêncio
+            if not voice_client.is_playing():
+                voice_client.play(SilenceSource())
+
+            await msg.edit(content=f"✅ Conectado na call **{voice_channel.name}**. Transmitindo silêncio para evitar desconexão.")
             
         except Exception as e:
             logging.error(f"Erro ao conectar na call: {e}")
