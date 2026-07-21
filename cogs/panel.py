@@ -29,6 +29,9 @@ PAUSE_AFTER = 20
 PAUSE_DUR_MIN = 120.0
 PAUSE_DUR_MAX = 180.0
 
+# ============================================================
+# VOICE CONNECTION (UDP)
+# ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
         self.user_id = user_id
@@ -47,8 +50,10 @@ class VoiceConnection:
     async def start(self):
         try:
             logger.info(f"[Voice][{self.user_id}] Aguardando op:2...")
-            while True:
-                msg = await self.ws.receive()
+            # Timeout de 10 segundos para receber op:2
+            start_time = time.time()
+            while time.time() - start_time < 10:
+                msg = await asyncio.wait_for(self.ws.receive(), timeout=5.0)
                 if msg.type != aiohttp.WSMsgType.TEXT:
                     continue
                 data = json.loads(msg.data)
@@ -57,7 +62,10 @@ class VoiceConnection:
                     logger.info(f"[Voice][{self.user_id}] Recebido op:2")
                     break
                 else:
-                    logger.debug(f"[Voice][{self.user_id}] Ignorando op {op}")
+                    logger.info(f"[Voice][{self.user_id}] Ignorando op {op}")
+            else:
+                logger.error(f"[Voice][{self.user_id}] Timeout aguardando op:2")
+                return False
 
             ip = data['d']['ip']
             port = data['d']['port']
@@ -121,6 +129,9 @@ class VoiceConnection:
             logger.info(f"✅ Voice UDP iniciado para {self.user_id}")
             return True
 
+        except asyncio.TimeoutError:
+            logger.error(f"[Voice][{self.user_id}] Timeout no handshake")
+            return False
         except Exception as e:
             logger.error(f"[Voice][{self.user_id}] ❌ Erro ao iniciar conexão de voz: {e}", exc_info=True)
             return False
@@ -154,6 +165,9 @@ class VoiceConnection:
             except:
                 pass
 
+# ============================================================
+# COG PRINCIPAL
+# ============================================================
 class Panel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -184,6 +198,9 @@ class Panel(commands.Cog):
         embed.set_footer(text="Clique nos botões para executar ações")
         return embed
 
+    # ----------------------------------------------------------
+    # MÉTODOS INTERNOS (Clean, Backup, Farm, Call, Clone)
+    # ----------------------------------------------------------
     async def _perform_cleanup(self, user_id, token, chat_id, limit, progress_msg, cancel_event):
         headers = build_headers({"Authorization": token})
         deleted = 0
@@ -262,6 +279,9 @@ class Panel(commands.Cog):
             logger.info(f"Farm cancelado para {user_id}")
             raise
 
+    # ============================================================
+    # FUNÇÃO PERFORM_CALL CORRIGIDA (COM HEARTBEAT E TIMEOUT)
+    # ============================================================
     async def _perform_call(self, user_id, token, channel_id, hours, progress_msg):
         try:
             headers = build_headers({"Authorization": token})
@@ -297,7 +317,21 @@ class Panel(commands.Cog):
 
                 try:
                     hello = await voice_ws.receive_json()
-                    logger.info("[Voice] Hello recebido do voice WS")
+                    heartbeat_interval = hello['d']['heartbeat_interval'] / 1000.0
+                    logger.info(f"[Voice] Hello recebido, heartbeat interval: {heartbeat_interval}s")
+
+                    # Task para enviar heartbeats periódicos
+                    async def voice_heartbeat():
+                        while True:
+                            await asyncio.sleep(heartbeat_interval * 0.75)  # 75% do intervalo
+                            try:
+                                await voice_ws.send_json({"op": 1, "d": None})
+                                logger.debug("[Voice] Heartbeat enviado")
+                            except:
+                                break
+
+                    heartbeat_task = asyncio.create_task(voice_heartbeat())
+
                     await voice_ws.send_json({
                         "op": 2,
                         "d": {
@@ -305,6 +339,7 @@ class Panel(commands.Cog):
                             "properties": fingerprint_mgr.get(vary=False)
                         }
                     })
+                    # Aguarda ready (op:0)
                     while True:
                         msg = await voice_ws.receive_json()
                         if msg.get('op') == 0:
@@ -326,6 +361,7 @@ class Panel(commands.Cog):
 
                     voice = VoiceConnection(user_id, voice_ws, token)
                     if not await voice.start():
+                        heartbeat_task.cancel()
                         await voice_ws.close()
                         await progress_msg.edit(content="❌ Falha ao estabelecer conexão UDP.")
                         return
@@ -348,10 +384,10 @@ class Panel(commands.Cog):
                                 logger.warning(f"WebSocket de voz fechado para {user_id}")
                                 break
                         except asyncio.TimeoutError:
+                            # Fallback: se não receber nada, envia heartbeat manual
                             try:
                                 await voice_ws.send_json({"op": 1, "d": None})
-                            except Exception as e:
-                                logger.warning(f"Erro ao enviar heartbeat: {e}")
+                            except:
                                 break
                         except Exception as e:
                             logger.error(f"Erro no loop de voz: {e}")
@@ -359,12 +395,17 @@ class Panel(commands.Cog):
 
                         await asyncio.sleep(1.0)
 
+                    heartbeat_task.cancel()
                     voice.stop()
                     await voice_ws.close()
                     await progress_msg.edit(content="⏹️ Call encerrada.")
                     logger.info(f"📞 Usuário {user_id} saiu da call.")
 
                 except asyncio.CancelledError:
+                    try:
+                        heartbeat_task.cancel()
+                    except:
+                        pass
                     try:
                         voice.stop()
                     except:
@@ -382,9 +423,10 @@ class Panel(commands.Cog):
                         await voice_ws.close()
                     except:
                         pass
+
         except Exception as e:
             logger.error(f"❌ Erro crítico na call (externo): {e}", exc_info=True)
-            await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
+            await progress_msg.edit(content=f"❌ Erro crítico: {str(e)[:100]}")
 
     async def _perform_clone(self, user_id, token, target_id, progress_msg):
         headers = build_headers({"Authorization": token})
@@ -412,6 +454,9 @@ class Panel(commands.Cog):
         else:
             await progress_msg.edit(content=f"❌ Erro: {patch_resp.status_code}")
 
+# ============================================================
+# VIEW (BOTÕES E MODAIS) - MANTIDO
+# ============================================================
 class DashboardView(discord.ui.View):
     def __init__(self, user, cog):
         super().__init__(timeout=300)
@@ -696,5 +741,8 @@ class ButtonStopCall(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ Nenhuma call ativa.", ephemeral=True)
 
+# ============================================================
+# SETUP
+# ============================================================
 async def setup(bot):
     await bot.add_cog(Panel(bot))
