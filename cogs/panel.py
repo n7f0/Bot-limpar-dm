@@ -1,66 +1,46 @@
 import discord
 from discord.ext import commands
-import os
-import asyncio
+from discord import app_commands
 import logging
 
-logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-intents = discord.Intents.default()
-intents.members = True
-intents.message_content = True
-intents.guilds = True
-intents.voice_states = True
+class Panel(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
 
-bot = commands.Bot(command_prefix='!', intents=intents)
+    @app_commands.command(name="paineldm", description="Exibe o painel de controle no servidor")
+    async def paineldm(self, interaction: discord.Interaction):
+        """Envia o painel com botões para o canal atual."""
+        embed = discord.Embed(
+            title="🛡️ Painel de Controle - Gerenciamento e Limpeza",
+            description="Utilize os botões abaixo para interagir com o sistema diretamente por este canal.",
+            color=0x58B3FF  # azul
+        )
+        embed.add_field(name="Status do Servidor", value="🟢 Online e Operacional", inline=True)
+        embed.add_field(name="Disponibilidade", value="24/7 Ativo", inline=True)
+        embed.set_footer(text="Painel Público do Servidor")
 
-async def load_extensions():
-    try:
-        await bot.load_extension("cogs.panel")
-        logging.info("✅ Cog carregado: cogs.panel")
-    except Exception as e:
-        # Mostra o erro exato e completo no console do Portainer
-        logging.error(f"❌ Erro crítico ao carregar cogs.panel: {type(e).__name__} - {e}")
-        import traceback
-        traceback.print_exc()
+        # Cria uma View com um botão (pode adicionar mais depois)
+        view = discord.ui.View()
+        button = discord.ui.Button(
+            label="🧹 Iniciar Ação",
+            style=discord.ButtonStyle.primary,
+            custom_id="btn_limpar"
+        )
+        view.add_item(button)
 
-# Hook para carregar as extensões antes de ligar o bot
-async def setup_hook():
-    await load_extensions()
+        # Envia a mensagem com embed e botão
+        await interaction.response.send_message(embed=embed, view=view)
+        logger.info(f"Painel enviado no canal {interaction.channel.id} por {interaction.user}")
 
-bot.setup_hook = setup_hook
+    # Opcional: callback para o botão (exemplo)
+    @commands.Cog.listener()
+    async def on_interaction(self, interaction: discord.Interaction):
+        if interaction.type == discord.InteractionType.component:
+            if interaction.data.get("custom_id") == "btn_limpar":
+                await interaction.response.send_message("Ação de limpeza iniciada!", ephemeral=True)
+                # Aqui você chama sua lógica de limpeza
 
-@bot.event
-async def on_ready():
-    logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    try:
-        synced = await bot.tree.sync()
-        logging.info(f"✅ {len(synced)} comando(s) sincronizado(s): {[cmd.name for cmd in synced]}")
-    except Exception as e:
-        logging.error(f"❌ Erro ao sincronizar: {e}")
-
-@bot.event
-async def on_disconnect():
-    logging.warning("⚠️ Bot desconectado. Reconectando automaticamente...")
-
-@bot.event
-async def on_resumed():
-    logging.info("✅ Conexão restaurada.")
-
-if __name__ == "__main__":
-    token = os.getenv('BOT_TOKEN')
-    if not token:
-        logging.error("❌ BOT_TOKEN não definido.")
-        exit(1)
-
-    while True:
-        try:
-            asyncio.run(bot.start(token))
-        except discord.errors.LoginFailure as e:
-            logging.error(f"❌ Falha no login: {e}. Verifique o token.")
-            break
-        except Exception as e:
-            logging.error(f"❌ Erro fatal: {e}. Reiniciando em 10s...")
-            import traceback
-            traceback.print_exc()
-            asyncio.sleep(10)
+async def setup(bot):
+    await bot.add_cog(Panel(bot))
