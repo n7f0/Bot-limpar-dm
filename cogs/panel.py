@@ -1,4 +1,3 @@
-sudo docker exec -it bot-limpar-dm-bot bash -c "cat > /app/cogs/panel.py << 'EOF'
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -22,19 +21,34 @@ class Panel(commands.Cog):
 
 class ButtonCall(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="🎧 Teste Call (sem UDP)", style=discord.ButtonStyle.success)
+        super().__init__(label="🎧 Entrar na Call", style=discord.ButtonStyle.success)
 
     async def callback(self, interaction: discord.Interaction):
         await interaction.response.defer()
-        msg = await interaction.followup.send("🔄 Entrando na call (teste sem UDP)...")
+        
+        # Verifica se o usuário que clicou no botão está em um canal de voz
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.followup.send("❌ Você precisa estar em um canal de voz para eu entrar!", ephemeral=True)
+            return
+
+        voice_channel = interaction.user.voice.channel
+        msg = await interaction.followup.send(f"🔄 Conectando ao canal: {voice_channel.name}...")
+
         try:
-            # Entra na call (apenas simula)
-            await asyncio.sleep(60 * 5)  # 5 minutos
-            await msg.edit(content="✅ Call finalizada.")
-        except asyncio.CancelledError:
-            await msg.edit(content="⏹️ Call interrompida.")
-            raise
+            # Verifica se o bot já está em alguma call neste servidor para não duplicar conexões
+            voice_client = discord.utils.get(interaction.client.voice_clients, guild=interaction.guild)
+            
+            if voice_client and voice_client.is_connected():
+                await voice_client.move_to(voice_channel)
+            else:
+                # Estabelece a conexão WebSocket + UDP real
+                voice_client = await voice_channel.connect()
+
+            await msg.edit(content=f"✅ Conectado na call **{voice_channel.name}** com protocolo UDP ativo.")
+            
+        except Exception as e:
+            logging.error(f"Erro ao conectar na call: {e}")
+            await msg.edit(content=f"❌ Ocorreu um erro ao tentar conectar: {e}")
 
 async def setup(bot):
     await bot.add_cog(Panel(bot))
-EOF"
