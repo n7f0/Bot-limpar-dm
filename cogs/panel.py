@@ -82,7 +82,7 @@ class Panel(commands.Cog):
         init_db()
         self.farm_tasks = {}
         self.schedule_tasks = {}
-        self.voice_connections = {}
+        self.voice_clients = {}  # user_id -> voice_client
 
     # ========== COMANDO ==========
     @app_commands.command(name="paineldm", description="Abre o painel de controle")
@@ -108,7 +108,7 @@ class Panel(commands.Cog):
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    # ========== FUNÇÃO DE VOZ (CORRIGIDA - SEM DAVEY) ==========
+    # ========== FUNÇÃO DE VOZ (SEM DAVEY) ==========
     async def join_voice(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
         guild = self.bot.get_guild(guild_id)
         if not guild:
@@ -124,27 +124,27 @@ class Panel(commands.Cog):
             return
 
         try:
-            vc = await channel.connect()
-            self.voice_connections[interaction.user.id] = vc
+            vc = await channel.connect(timeout=30.0)
+            self.voice_clients[interaction.user.id] = vc
             await interaction.followup.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.", ephemeral=True)
 
-            # Mantém a conexão ativa por X horas com um loop de "keepalive"
-            # Envia um sinal de áudio silencioso a cada 30s (usando FFmpeg se disponível)
-            # Se não tiver FFmpeg, apenas aguarda e desconecta.
-            try:
-                # Cria um stream de silêncio usando FFmpeg (requer ffmpeg instalado)
-                import subprocess
-                # Gera um arquivo de silêncio de 1 segundo
-                subprocess.run(['ffmpeg', '-f', 'lavfi', '-i', 'anullsrc=r=44100:cl=mono', '-t', '1', '-acodec', 'pcm_s16le', '/tmp/silence.wav'], check=False)
-                source = discord.FFmpegPCMAudio('/tmp/silence.wav')
-                vc.play(source, after=lambda e: None)
-            except:
-                # Sem ffmpeg, apenas mantém a conexão com um loop de ping
-                # O Discord desconecta após ~5min de inatividade, então isso é uma solução básica
-                pass
-
-            # Aguarda as horas e desconecta
-            await asyncio.sleep(hours * 3600)
+            # Mantém a conexão por X horas (sem áudio, apenas keepalive)
+            # O Discord desconecta após ~5min de inatividade, então precisamos enviar dados.
+            # Vamos usar um loop que envia um "ping" via websocket (nativo do discord.py)
+            # Para manter a conexão, podemos tocar um áudio de silêncio (se ffmpeg disponível)
+            # Ou simplesmente esperar e reconectar se cair.
+            # Vamos usar o método mais simples: esperar e tentar manter viva.
+            # Se o bot for desconectado, reconecta.
+            start_time = asyncio.get_event_loop().time()
+            while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
+                await asyncio.sleep(30)
+                # Verifica se ainda está conectado
+                if not vc.is_connected():
+                    # Tenta reconectar
+                    try:
+                        await vc.connect()
+                    except:
+                        pass
             if vc.is_connected():
                 await vc.disconnect()
                 await interaction.followup.send("🔇 Desconectado após o tempo programado.", ephemeral=True)
@@ -167,7 +167,7 @@ class PanelView(discord.ui.View):
         self.add_item(RefreshButton(cog, user_id))
 
 
-# ========== SELECT ==========
+# ========== SELECT CORRIGIDO ==========
 class ActionSelect(discord.ui.Select):
     def __init__(self, cog, user_id, config):
         options = [
@@ -189,13 +189,14 @@ class ActionSelect(discord.ui.Select):
             return
 
         value = self.values[0]
+        # ENCONTRA O LABEL DA OPÇÃO SELECIONADA
+        selected_label = next((opt.label for opt in self.options if opt.value == value), value)
+
         embed = interaction.message.embeds[0]
-        # Remove campo antigo se existir
-        embed.clear_fields()
-        embed = self.cog._build_embed(interaction.user, self.config)
-        embed.add_field(name="⚡ Ação selecionada", value=f"`{dict(self.options).get(value, value)}`", inline=False)
+        embed.add_field(name="⚡ Ação selecionada", value=f"`{selected_label}`", inline=False)
 
         view = ActionView(self.cog, self.user_id, self.config, value)
+        # CORRETO: usa interaction.response.edit_message (ainda não respondida)
         await interaction.response.edit_message(embed=embed, view=view)
 
 
@@ -420,6 +421,7 @@ class TokenModal(discord.ui.Modal, title="Configurar Token"):
             return
         save_user_config(self.user_id, token=self.token.value.strip())
         await interaction.response.send_message("✅ Token salvo!", ephemeral=True)
+        # Atualizar painel
         config = get_user_config(self.user_id)
         embed = self.cog._build_embed(interaction.user, config)
         view = PanelView(self.cog, self.user_id, config)
@@ -477,15 +479,18 @@ class ScheduleModal(discord.ui.Modal, title="Agendar Mensagem"):
 
         async def wrapper():
             ok = await schedule_message(config['token'], config['channel_id'], self.content.value.strip(), mins)
-            await interaction.followup.send(f"✅ Mensagem enviada!" if ok else "❌ Falha ao enviar.", ephemeral=True)
+            try:
+                await interaction.followup.send(f"✅ Mensagem enviada!" if ok else "❌ Falha ao enviar.", ephemeral=True)
+            except:
+                pass
 
         task = asyncio.create_task(wrapper())
         self.cog.schedule_tasks[self.user_id] = task
         await interaction.response.send_message(f"⏰ Agendado para {mins} min.", ephemeral=True)
 
 class FarmModal(discord.ui.Modal, title="Auto-Farm"):
-    interval = discord.ui.TextInput(label="Intervalo (segundos)", placeholder="60", required=True)
-    repeats = discord.ui.TextInput(label="Repetições (0 = infinito)", placeholder="10", required=True)
+    interval = discord.ui.TextInput(label="Intervalo (min)", placeholder="120", required=True)
+    repeat = discord.ui.TextInput(label="Repetir (0 = infinito)", placeholder="0", required=True)
     messages = discord.ui.TextInput(label="Mensagens (separadas por |)", placeholder="Olá|Teste", required=True, style=discord.TextStyle.paragraph)
 
     def __init__(self, cog, user_id):
@@ -499,9 +504,9 @@ class FarmModal(discord.ui.Modal, title="Auto-Farm"):
             return
         try:
             interval = int(self.interval.value.strip())
-            repeats = int(self.repeats.value.strip())
+            repeat = int(self.repeat.value.strip())
         except:
-            await interaction.response.send_message("❌ Intervalo ou repetições inválidos.", ephemeral=True)
+            await interaction.response.send_message("❌ Intervalo ou repetição inválidos.", ephemeral=True)
             return
         msgs = [m.strip() for m in self.messages.value.split('|') if m.strip()]
         if not msgs:
@@ -516,11 +521,22 @@ class FarmModal(discord.ui.Modal, title="Auto-Farm"):
             self.cog.farm_tasks[self.user_id].cancel()
 
         async def wrapper():
-            await auto_farm(config['token'], config['channel_id'], msgs, interval_seconds=interval, repeats=repeats)
+            await auto_farm(config['token'], config['channel_id'], msgs, interval_min=interval, jitter=5, repeat_count=repeat)
+            # Notificar quando terminar (se não for infinito)
+            if repeat > 0:
+                try:
+                    await interaction.followup.send(f"✅ Farm finalizado após {repeat} execuções.", ephemeral=True)
+                except:
+                    pass
 
         task = asyncio.create_task(wrapper())
         self.cog.farm_tasks[self.user_id] = task
-        await interaction.response.send_message(f"🔄 Farm iniciado: {len(msgs)} msgs a cada {interval}s, {repeats if repeats>0 else 'infinitas'} repetições.", ephemeral=True)
+        msg = f"🔄 Farm iniciado com {len(msgs)} mensagens a cada {interval} min."
+        if repeat > 0:
+            msg += f" (repetir {repeat} vezes)"
+        else:
+            msg += " (indefinido)"
+        await interaction.response.send_message(msg, ephemeral=True)
 
 class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
     target_id = discord.ui.TextInput(label="ID do alvo", placeholder="1234567890", required=True)
