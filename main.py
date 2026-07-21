@@ -2,7 +2,6 @@ import discord
 from discord.ext import commands
 import os
 import asyncio
-import logging
 from utils.logger import get_logger
 from utils.db import init_db
 from utils.security import load_encryption_key
@@ -14,12 +13,11 @@ intents = discord.Intents.default()
 intents.members = True
 intents.message_content = True
 intents.guilds = True
-intents.voice_states = True  # necessário para voz
+intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_extensions():
-    # APENAS O PAINEL (nenhum outro cog)
     cogs = ["cogs.panel"]
     for cog in cogs:
         try:
@@ -31,17 +29,12 @@ async def load_extensions():
 @bot.event
 async def on_ready():
     logger.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    # Sincroniza apenas o comando /painel
+    # Sincroniza comandos sem limpar (evita erro)
     try:
-        # Limpa comandos antigos (forma correta)
-        bot.tree.clear_commands(guild=None)  # ← argumento nomeado
-        await bot.tree.sync()
-        # Sincroniza novamente para garantir
         synced = await bot.tree.sync()
         logger.info(f"✅ {len(synced)} comando(s) sincronizado(s): {[cmd.name for cmd in synced]}")
     except Exception as e:
         logger.error(f"❌ Erro ao sincronizar comandos: {e}")
-    # Inicia a tarefa de presença
     bot.loop.create_task(update_presence())
 
 @bot.event
@@ -64,20 +57,29 @@ async def update_presence():
                     state="Modo Stealth"
                 )
                 await bot.change_presence(activity=activity, status=discord.Status.online)
-            await asyncio.sleep(60)  # atualiza a cada 1 minuto
+            await asyncio.sleep(60)
         except Exception as e:
             logger.error(f"Erro na presença: {e}")
             await asyncio.sleep(10)
 
+async def run_bot():
+    token = os.getenv('BOT_TOKEN')
+    if not token:
+        logger.error("❌ BOT_TOKEN não definido.")
+        return
+    # Loop de reconexão manual (redundante, mas seguro)
+    while True:
+        try:
+            async with bot:
+                init_db()
+                await load_extensions()
+                await bot.start(token)
+        except discord.errors.ConnectionClosed as e:
+            logger.error(f"❌ Conexão fechada: {e}. Reconectando em 10s...")
+            await asyncio.sleep(10)
+        except Exception as e:
+            logger.error(f"❌ Erro fatal: {e}. Reiniciando em 10s...")
+            await asyncio.sleep(10)
+
 if __name__ == "__main__":
-    async def main():
-        async with bot:
-            init_db()
-            await load_extensions()
-            token = os.getenv('BOT_TOKEN')
-            if not token:
-                logger.error("❌ BOT_TOKEN não definido.")
-                return
-            # Loop de reconexão (já embutido no bot.start)
-            await bot.start(token)
-    asyncio.run(main())
+    asyncio.run(run_bot())
