@@ -41,12 +41,12 @@ async def send_identify(ws):
     await ws.send(json.dumps(payload))
 
 async def handle_messages(ws, data):
-    """Gerencia as mensagens recebidas para responder ao comando !painel"""
+    """Gerencia as mensagens recebidas para responder ao comando /paineldm"""
     try:
         t = data.get("t")
         if t == "MESSAGE_CREATE":
             msg = data.get("d", {})
-            content = msg.get("content", "")
+            content = msg.get("content", "").strip()
             channel_id = msg.get("channel_id")
             author = msg.get("author", {})
 
@@ -54,18 +54,18 @@ async def handle_messages(ws, data):
             if author.get("id") == "1529128615155994787":
                 return
 
-            if content == "!painel":
+            if content == "/paineldm":
                 # Envia uma requisição HTTP para a API do Discord respondendo no chat
                 url = f"https://discord.com/api/v10/channels/{channel_id}/messages"
                 headers = {
-                    "Authorization": f"Bot {TOKEN}" if not TOKEN.startswith("MT") else TOKEN, # Suporte a token de usuário ou bot
+                    "Authorization": f"Bot {TOKEN}" if not TOKEN.startswith("MT") else TOKEN,
                     "Content-Type": "application/json"
                 }
                 payload = {
-                    "content": "🛡️ **Painel de Controle Ativo!**\nBot online e conectado via Gateway direto."
+                    "content": "🛡️ **Painel DM Ativo!**\nPainel de controle de limpeza e gerenciamento pronto para uso via WebSocket."
                 }
                 await session.post(url, headers=headers, json=payload)
-                logging.info(f"Painel enviado via comando !painel no canal {channel_id}")
+                logging.info(f"Painel enviado via comando /paineldm no canal {channel_id}")
     except Exception as e:
       logging.error(f"Erro ao processar mensagem: {e}")
 
@@ -92,7 +92,7 @@ async def start_discord_gateway():
                         user = d.get('user', {})
                         logging.info(f"✅ Conectado com sucesso na API como {user.get('username')} (ID: {user.get('id')})!")
 
-                    # Processa eventos de mensagens e rede
+                    # Processa eventos de mensagens em tempo real
                     asyncio.create_task(handle_messages(ws, data))
 
         except Exception as e:
