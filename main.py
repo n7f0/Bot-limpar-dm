@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import os
 import asyncio
@@ -8,11 +9,10 @@ logging.basicConfig(level=logging.INFO)
 
 intents = discord.Intents.default()
 intents.members = True
-intents.message_content = True
 intents.guilds = True
 intents.voice_states = True
 
-# Mantém o prefixo '!'
+# Removido o prefixo de texto para focar puramente em Slash Commands (/)
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # --- Gerador de Silêncio Contínuo ---
@@ -56,16 +56,26 @@ class PanelView(discord.ui.View):
             logging.error(f"Erro ao conectar na call: {e}")
             await msg.edit(content=f"❌ Ocorreu um erro ao tentar conectar: {e}")
 
-# Comando alterado para '!meupainel' para evitar conflito com o outro bot
-@bot.command(name='meupainel')
-async def meupainel(ctx):
-    embed = discord.Embed(title="🛡️ Painel", color=discord.Color.blue())
+# Comando de barra com nome único para não conflitar com outros bots
+@bot.tree.command(name='painelvoz', description='Painel de controle de voz do bot')
+async def painelvoz(interaction: discord.Interaction):
+    await interaction.response.defer()
+    embed = discord.Embed(title="🛡️ Painel de Voz", color=discord.Color.blue())
     embed.add_field(name="Status", value="✅ Bot online e blindado")
-    await ctx.send(embed=embed, view=PanelView())
+    await interaction.followup.send(embed=embed, view=PanelView())
 
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot logado com sucesso como {bot.user} (ID: {bot.user.id})")
+    
+    # Sincroniza o comando de barra instantaneamente em todos os servidores do bot
+    for guild in bot.guilds:
+        try:
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            logging.info(f"✅ Sincronizado no servidor {guild.name}: {[cmd.name for cmd in synced]}")
+        except Exception as e:
+            logging.error(f"❌ Erro ao sincronizar no servidor {guild.name}: {e}")
 
 @bot.event
 async def on_disconnect():
