@@ -7,7 +7,6 @@ WORKDIR /app
 ARG GITHUB_TOKEN
 RUN git clone https://${GITHUB_TOKEN}@github.com/n7f0/Bot-limpar-dm.git . || git clone https://github.com/n7f0/Bot-limpar-dm.git .
 
-# Cria todos os __init__.py vazios (garantia)
 RUN mkdir -p /app/cogs /app/utils /app/models && \
     echo "" > /app/cogs/__init__.py && \
     echo "" > /app/utils/__init__.py && \
