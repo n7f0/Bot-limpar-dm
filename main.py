@@ -35,8 +35,14 @@ async def on_ready():
         logging.error(f"❌ Erro ao sincronizar comandos: {e}")
 
 async def main():
-    await load_cogs()
-    await bot.start(TOKEN)
+    try:
+        await load_cogs()
+        await bot.start(TOKEN)
+    except Exception as e:
+        logging.error(f"❌ Erro fatal: {e}")
+        # Aguarda e reinicia
+        await asyncio.sleep(5)
+        await main()
 
 if __name__ == "__main__":
     asyncio.run(main())
