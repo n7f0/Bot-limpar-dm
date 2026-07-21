@@ -1,7 +1,10 @@
 FROM python:3.11-slim
 
+# Instala dependências do sistema para voz e criptografia
 RUN apt-get update && apt-get install -y \
     ffmpeg \
+    libsodium-dev \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
