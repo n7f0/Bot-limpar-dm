@@ -2,7 +2,7 @@ version: '3.8'
 services:
   bot:
     build: .
-    container_name: bot-limpar-dm-bot
+    container_name: nexzy-clear-bot
     restart: always
     network_mode: host
     dns:
@@ -13,4 +13,3 @@ services:
     volumes:
       - ./data:/app/data
       - ./secret.key:/app/secret.key
-#
