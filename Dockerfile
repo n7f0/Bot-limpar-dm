@@ -1,10 +1,11 @@
 FROM python:3.11-slim
 
-# Instala dependências do sistema para voz e criptografia
+# Instala dependências de sistema para compilar PyNaCl e ffmpeg
 RUN apt-get update && apt-get install -y \
-    ffmpeg \
     libsodium-dev \
     build-essential \
+    python3-dev \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
