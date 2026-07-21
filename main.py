@@ -1,5 +1,5 @@
 import os
-# FORÇA O USO DO PyNaCl COMO DRIVER DE VOZ
+# FORÇA O USO DO PyNaCl EM VEZ DO DAVEY
 os.environ['DISCORD_VOICE_DRIVER'] = 'pynacl'
 
 import asyncio
