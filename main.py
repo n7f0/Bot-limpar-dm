@@ -1,4 +1,5 @@
 import discord
+from discord import app_commands
 from discord.ext import commands
 import os
 import asyncio
@@ -14,17 +15,53 @@ intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-async def load_extensions():
-    try:
-        await bot.load_extension("cogs.panel")
-        logging.info("✅ Cog carregado: cogs.panel")
-    except Exception as e:
-        logging.error(f"❌ Erro ao carregar cogs.panel: {e}")
+# --- Gerador de Silêncio Contínuo para Evitar Queda na Call ---
+class SilenceSource(discord.AudioSource):
+    def read(self) -> bytes:
+        return b'\x00' * 3840
+        
+    def is_opus(self) -> bool:
+        return False
 
-# ADICIONADO: Hook de inicialização para garantir que o painel carregue antes da sincronização
-async def setup_hook():
-    await load_extensions()
-bot.setup_hook = setup_hook
+# --- Lógica do Painel e Anti-Queda integrada ---
+class PanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="🎧 Entrar na Call (Modo Definitivo)", style=discord.ButtonStyle.success)
+    async def join_call(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        if not interaction.user.voice or not interaction.user.voice.channel:
+            await interaction.followup.send("❌ Você precisa estar em um canal de voz!", ephemeral=True)
+            return
+
+        voice_channel = interaction.user.voice.channel
+        msg = await interaction.followup.send(f"🔄 Conectando ao canal: {voice_channel.name}...")
+
+        try:
+            voice_client = discord.utils.get(interaction.client.voice_clients, guild=interaction.guild)
+            
+            if voice_client and voice_client.is_connected():
+                await voice_client.move_to(voice_channel)
+            else:
+                voice_client = await voice_channel.connect(self_deaf=True, reconnect=True)
+
+            if not voice_client.is_playing():
+                voice_client.play(SilenceSource())
+
+            await msg.edit(content=f"✅ Conectado em **{voice_channel.name}** com tráfego contínuo ativo!")
+            
+        except Exception as e:
+            logging.error(f"Erro ao conectar na call: {e}")
+            await msg.edit(content=f"❌ Ocorreu um erro ao tentar conectar: {e}")
+
+@bot.tree.command(name='painel', description='Painel de controle')
+async def painel(interaction: discord.Interaction):
+    await interaction.response.defer()
+    embed = discord.Embed(title="🛡️ Painel", color=discord.Color.blue())
+    embed.add_field(name="Status", value="✅ Bot online e blindado")
+    await interaction.followup.send(embed=embed, view=PanelView())
 
 @bot.event
 async def on_ready():
