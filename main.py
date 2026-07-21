@@ -82,7 +82,6 @@ async def main():
             logger.info("🔄 Reiniciando o bot em 15 segundos...")
             await asyncio.sleep(15)
         else:
-            # Se o bot parar normalmente (sem erro), também reiniciamos
             logger.info("🔄 Bot encerrado. Reiniciando em 10 segundos...")
             await asyncio.sleep(10)
 
