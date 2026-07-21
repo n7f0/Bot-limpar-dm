@@ -8,6 +8,7 @@ import base64
 
 logger = logging.getLogger(__name__)
 
+# ========== OBTER ID DO USUÁRIO ==========
 async def get_user_id_from_token(token: str) -> str:
     headers = {'Authorization': token}
     async with aiohttp.ClientSession() as session:
@@ -143,30 +144,35 @@ async def schedule_message(token: str, channel_id: int, content: str, minutes: i
             return resp.status == 200
 
 # ========== AUTO-FARM COM REPETIÇÕES ==========
-async def auto_farm(token: str, channel_id: str, messages: list, interval_min: int, max_iterations: int = 0):
+async def auto_farm(token: str, channel_id: str, messages: list, interval_seconds: int = 60, repeats: int = 0):
     """
-    Envia mensagens em loop com intervalo definido.
-    Se max_iterations > 0, para após esse número de ciclos.
+    Envia mensagens repetidamente com intervalo em segundos.
+    Se repeats=0, repete infinitamente.
     """
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
+    sent = 0
+    total = repeats if repeats > 0 else float('inf')
+
     async with aiohttp.ClientSession() as session:
-        iteration = 0
-        while True:
-            if max_iterations > 0 and iteration >= max_iterations:
-                break
+        while sent < total:
             for msg in messages:
+                if sent >= total:
+                    break
                 typing_url = f'https://discord.com/api/v9/channels/{channel_id}/typing'
                 await session.post(typing_url, headers=headers)
-                await asyncio.sleep(random.uniform(1.0, 2.5))
+                await asyncio.sleep(random.uniform(1.0, 2.0))
                 payload = {'content': msg}
                 send_url = f'https://discord.com/api/v9/channels/{channel_id}/messages'
                 async with session.post(send_url, headers=headers, json=payload) as resp:
-                    # ignora resposta
-                    pass
-                await asyncio.sleep(random.uniform(2, 5))
-            iteration += 1
-            # Espera o intervalo em minutos
-            await asyncio.sleep(interval_min * 60)
+                    if resp.status == 200:
+                        sent += 1
+                    else:
+                        logger.warning(f"Falha ao enviar mensagem: {resp.status}")
+                await asyncio.sleep(random.uniform(0.5, 1.5))
+            if sent >= total:
+                break
+            # Aguarda o intervalo antes do próximo ciclo
+            await asyncio.sleep(interval_seconds)
 
 # ========== CLONAR PERFIL ==========
 async def clone_profile(token: str, target_user_id: str):
