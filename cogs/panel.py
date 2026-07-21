@@ -21,9 +21,6 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# ============================================================
-# CONSTANTES DE SEGURANÇA
-# ============================================================
 MAX_MESSAGES = 150
 MAX_BACKUP = 3000
 MIN_DELAY = 15.0
@@ -32,9 +29,6 @@ PAUSE_AFTER = 20
 PAUSE_DUR_MIN = 120.0
 PAUSE_DUR_MAX = 180.0
 
-# ============================================================
-# CLASSE VOICE CONNECTION (UDP)
-# ============================================================
 class VoiceConnection:
     def __init__(self, user_id, ws, token):
         self.user_id = user_id
@@ -160,13 +154,10 @@ class VoiceConnection:
             except:
                 pass
 
-# ============================================================
-# COG PRINCIPAL – PAINEL
-# ============================================================
 class Panel(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.active_tasks = {}  # user_id -> evento de cancelamento
+        self.active_tasks = {}
 
     @app_commands.command(name='painel', description='Abre o painel de controle completo')
     async def painel(self, interaction: discord.Interaction):
@@ -183,10 +174,7 @@ class Panel(commands.Cog):
         farm_chat_id = user.data.get('farm_chat_id')
         farm_msg = user.data.get('farm_message', '')
         auto_farm = user.data.get('auto_farming', 0)
-        embed = discord.Embed(
-            title="🛡️ Nexzy Pro - Painel",
-            color=discord.Color.blue()
-        )
+        embed = discord.Embed(title="🛡️ Nexzy Pro - Painel", color=discord.Color.blue())
         embed.add_field(name="Tokens", value=f"{len(tokens)} configurados", inline=True)
         embed.add_field(name="Token ativo", value=f"#{default_idx+1}" if tokens else "Nenhum", inline=True)
         embed.add_field(name="Canal (Limpeza/Backup)", value=f"<#{chat_id}>" if chat_id else "Não definido", inline=False)
@@ -196,9 +184,6 @@ class Panel(commands.Cog):
         embed.set_footer(text="Clique nos botões para executar ações")
         return embed
 
-    # ----------------------------------------------------------
-    # MÉTODOS INTERNOS (Clean, Backup, Farm, Call, Clone)
-    # ----------------------------------------------------------
     async def _perform_cleanup(self, user_id, token, chat_id, limit, progress_msg, cancel_event):
         headers = build_headers({"Authorization": token})
         deleted = 0
@@ -277,124 +262,129 @@ class Panel(commands.Cog):
             logger.info(f"Farm cancelado para {user_id}")
             raise
 
-    # ============================================================
-    # FUNÇÃO PERFORM_CALL CORRIGIDA (COM HEARTBEAT E ESTABILIDADE)
-    # ============================================================
     async def _perform_call(self, user_id, token, channel_id, hours, progress_msg):
-        headers = build_headers({"Authorization": token})
-        async with aiohttp.ClientSession() as aio_session:
-            try:
-                async with aio_session.get("https://discord.com/api/v10/gateway") as resp_gw:
-                    if resp_gw.status != 200:
-                        raise Exception("Gateway API failed")
-                    gw_data = await resp_gw.json()
-                    gateway_url = gw_data['url'] + "?v=10&encoding=json"
-                    logger.info(f"[Voice] Gateway URL obtido: {gateway_url}")
-            except Exception as e:
-                logger.warning(f"[Voice] Erro ao obter gateway: {e}, usando fallback")
-                gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
+        try:
+            headers = build_headers({"Authorization": token})
+            async with aiohttp.ClientSession() as aio_session:
+                try:
+                    async with aio_session.get("https://discord.com/api/v10/gateway") as resp_gw:
+                        if resp_gw.status != 200:
+                            raise Exception("Gateway API failed")
+                        gw_data = await resp_gw.json()
+                        gateway_url = gw_data['url'] + "?v=10&encoding=json"
+                        logger.info(f"[Voice] Gateway URL obtido: {gateway_url}")
+                except Exception as e:
+                    logger.warning(f"[Voice] Erro ao obter gateway: {e}, usando fallback")
+                    gateway_url = "wss://gateway.discord.gg/?v=10&encoding=json"
 
-            resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
-            if resp.status_code != 200:
-                await progress_msg.edit(content=f"❌ Erro ao acessar canal (status {resp.status_code})")
-                return
-            channel_data = resp.json()
-            guild_id = channel_data.get('guild_id')
-            if not guild_id:
-                await progress_msg.edit(content="❌ Canal não pertence a um servidor de voz.")
-                return
-
-            try:
-                voice_ws = await aio_session.ws_connect(gateway_url, heartbeat=30.0)
-                logger.info("[Voice] WebSocket de voz conectado")
-            except Exception as e:
-                logger.error(f"[Voice] Erro ao conectar WS: {e}")
-                await progress_msg.edit(content=f"❌ Erro ao conectar ao gateway: {e}")
-                return
-
-            try:
-                hello = await voice_ws.receive_json()
-                logger.info("[Voice] Hello recebido do voice WS")
-                await voice_ws.send_json({
-                    "op": 2,
-                    "d": {
-                        "token": token,
-                        "properties": fingerprint_mgr.get(vary=False)
-                    }
-                })
-                # Aguarda ready (op:0)
-                while True:
-                    msg = await voice_ws.receive_json()
-                    if msg.get('op') == 0:
-                        logger.info("[Voice] Ready recebido")
-                        break
-                    else:
-                        logger.debug(f"[Voice] Ignorando op {msg.get('op')} antes do ready")
-
-                await voice_ws.send_json({
-                    "op": 4,
-                    "d": {
-                        "guild_id": guild_id,
-                        "channel_id": str(channel_id),
-                        "self_mute": True,
-                        "self_deaf": True
-                    }
-                })
-                logger.info("[Voice] Enviado op:4 para entrar na call")
-
-                voice = VoiceConnection(user_id, voice_ws, token)
-                if not await voice.start():
-                    await voice_ws.close()
-                    await progress_msg.edit(content="❌ Falha ao estabelecer conexão UDP.")
+                resp = await request_with_rate_limit('GET', f'https://discord.com/api/v10/channels/{channel_id}', headers=headers)
+                if resp.status_code != 200:
+                    await progress_msg.edit(content=f"❌ Erro ao acessar canal (status {resp.status_code})")
+                    return
+                channel_data = resp.json()
+                guild_id = channel_data.get('guild_id')
+                if not guild_id:
+                    await progress_msg.edit(content="❌ Canal não pertence a um servidor de voz.")
                     return
 
-                await progress_msg.edit(content=f"✅ Na call por {hours}h")
-                logger.info(f"📞 Usuário {user_id} entrou na call por {hours}h")
-
-                end_time = time.time() + (hours * 3600)
-                last_log = time.time()
-
-                while time.time() < end_time:
-                    if time.time() - last_log > 60:
-                        remaining = max(0, int((end_time - time.time()) / 60))
-                        await progress_msg.edit(content=f"🎧 Na call – faltam `{remaining}` minutos.")
-                        last_log = time.time()
-
-                    try:
-                        msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
-                        if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
-                            logger.warning(f"WebSocket de voz fechado para {user_id}")
-                            break
-                    except asyncio.TimeoutError:
-                        # Envia heartbeat para manter a conexão
-                        try:
-                            await voice_ws.send_json({"op": 1, "d": None})
-                        except Exception as e:
-                            logger.warning(f"Erro ao enviar heartbeat: {e}")
-                            break
-                    except Exception as e:
-                        logger.error(f"Erro no loop de voz: {e}")
-                        break
-
-                    await asyncio.sleep(1.0)
-
-                voice.stop()
-                await voice_ws.close()
-                await progress_msg.edit(content="⏹️ Call encerrada.")
-                logger.info(f"📞 Usuário {user_id} saiu da call.")
-
-            except asyncio.CancelledError:
-                voice.stop()
-                await voice_ws.close()
-                await progress_msg.edit(content="⏹️ Call interrompida.")
-                raise
-            except Exception as e:
-                logger.error(f"Erro geral na voz: {e}", exc_info=True)
-                await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
                 try:
+                    voice_ws = await aio_session.ws_connect(gateway_url, heartbeat=30.0)
+                    logger.info("[Voice] WebSocket de voz conectado")
+                except Exception as e:
+                    logger.error(f"[Voice] Erro ao conectar WS: {e}")
+                    await progress_msg.edit(content=f"❌ Erro ao conectar ao gateway: {e}")
+                    return
+
+                try:
+                    hello = await voice_ws.receive_json()
+                    logger.info("[Voice] Hello recebido do voice WS")
+                    await voice_ws.send_json({
+                        "op": 2,
+                        "d": {
+                            "token": token,
+                            "properties": fingerprint_mgr.get(vary=False)
+                        }
+                    })
+                    while True:
+                        msg = await voice_ws.receive_json()
+                        if msg.get('op') == 0:
+                            logger.info("[Voice] Ready recebido")
+                            break
+                        else:
+                            logger.debug(f"[Voice] Ignorando op {msg.get('op')} antes do ready")
+
+                    await voice_ws.send_json({
+                        "op": 4,
+                        "d": {
+                            "guild_id": guild_id,
+                            "channel_id": str(channel_id),
+                            "self_mute": True,
+                            "self_deaf": True
+                        }
+                    })
+                    logger.info("[Voice] Enviado op:4 para entrar na call")
+
+                    voice = VoiceConnection(user_id, voice_ws, token)
+                    if not await voice.start():
+                        await voice_ws.close()
+                        await progress_msg.edit(content="❌ Falha ao estabelecer conexão UDP.")
+                        return
+
+                    await progress_msg.edit(content=f"✅ Na call por {hours}h")
+                    logger.info(f"📞 Usuário {user_id} entrou na call por {hours}h")
+
+                    end_time = time.time() + (hours * 3600)
+                    last_log = time.time()
+
+                    while time.time() < end_time:
+                        if time.time() - last_log > 60:
+                            remaining = max(0, int((end_time - time.time()) / 60))
+                            await progress_msg.edit(content=f"🎧 Na call – faltam `{remaining}` minutos.")
+                            last_log = time.time()
+
+                        try:
+                            msg = await asyncio.wait_for(voice_ws.receive(), timeout=60.0)
+                            if msg.type in (WSMsgType.CLOSED, WSMsgType.ERROR):
+                                logger.warning(f"WebSocket de voz fechado para {user_id}")
+                                break
+                        except asyncio.TimeoutError:
+                            try:
+                                await voice_ws.send_json({"op": 1, "d": None})
+                            except Exception as e:
+                                logger.warning(f"Erro ao enviar heartbeat: {e}")
+                                break
+                        except Exception as e:
+                            logger.error(f"Erro no loop de voz: {e}")
+                            break
+
+                        await asyncio.sleep(1.0)
+
+                    voice.stop()
                     await voice_ws.close()
-                except:
-                    pass
+                    await progress_msg.edit(content="⏹️ Call encerrada.")
+                    logger.info(f"📞 Usuário {user_id} saiu da call.")
+
+                except asyncio.CancelledError:
+                    try:
+                        voice.stop()
+                    except:
+                        pass
+                    try:
+                        await voice_ws.close()
+                    except:
+                        pass
+                    await progress_msg.edit(content="⏹️ Call interrompida.")
+                    raise
+                except Exception as e:
+                    logger.error(f"Erro geral na voz: {e}", exc_info=True)
+                    await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
+                    try:
+                        await voice_ws.close()
+                    except:
+                        pass
+        except Exception as e:
+            logger.error(f"❌ Erro crítico na call (externo): {e}", exc_info=True)
+            await progress_msg.edit(content=f"❌ Erro: {str(e)[:100]}")
 
     async def _perform_clone(self, user_id, token, target_id, progress_msg):
         headers = build_headers({"Authorization": token})
@@ -422,9 +412,6 @@ class Panel(commands.Cog):
         else:
             await progress_msg.edit(content=f"❌ Erro: {patch_resp.status_code}")
 
-# ============================================================
-# VIEW (BOTÕES E MODAIS)
-# ============================================================
 class DashboardView(discord.ui.View):
     def __init__(self, user, cog):
         super().__init__(timeout=300)
@@ -444,23 +431,19 @@ class DashboardView(discord.ui.View):
     async def interaction_check(self, interaction):
         return interaction.user.id == self.user.user_id
 
-# ---------- BOTÃO: ADICIONAR TOKEN ----------
 class ButtonAddToken(discord.ui.Button):
     def __init__(self, user):
         super().__init__(label="🔑 Adicionar Token", style=discord.ButtonStyle.success)
         self.user = user
-
     async def callback(self, interaction: discord.Interaction):
         modal = TokenModal(self.user)
         await interaction.response.send_modal(modal)
 
 class TokenModal(discord.ui.Modal, title="🔑 Adicionar Token"):
     token_input = discord.ui.TextInput(label="Token do Discord", style=discord.TextStyle.paragraph, required=True)
-
     def __init__(self, user):
         super().__init__()
         self.user = user
-
     async def on_submit(self, interaction: discord.Interaction):
         token = self.token_input.value.strip()
         if not token:
@@ -472,12 +455,10 @@ class TokenModal(discord.ui.Modal, title="🔑 Adicionar Token"):
         self.user.save()
         await interaction.response.send_message("✅ Token adicionado!", ephemeral=True)
 
-# ---------- BOTÃO: DEFINIR CANAL ----------
 class ButtonSetChannel(discord.ui.Button):
     def __init__(self, user):
         super().__init__(label="💬 Definir Canal", style=discord.ButtonStyle.primary)
         self.user = user
-
     async def callback(self, interaction: discord.Interaction):
         modal = ChannelModal(self.user)
         await interaction.response.send_modal(modal)
@@ -485,11 +466,9 @@ class ButtonSetChannel(discord.ui.Button):
 class ChannelModal(discord.ui.Modal, title="💬 Definir Canal"):
     channel_input = discord.ui.TextInput(label="ID do Canal de Texto", style=discord.TextStyle.short, required=True)
     tipo = discord.ui.TextInput(label="Tipo (clean/farm)", style=discord.TextStyle.short, default="clean", required=False)
-
     def __init__(self, user):
         super().__init__()
         self.user = user
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
             chat_id = int(self.channel_input.value.strip())
@@ -504,13 +483,11 @@ class ChannelModal(discord.ui.Modal, title="💬 Definir Canal"):
         self.user.save()
         await interaction.response.send_message(f"✅ Canal definido ({tipo}): <#{chat_id}>", ephemeral=True)
 
-# ---------- BOTÃO: LIMPEZA ----------
 class ButtonClean(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="🧹 Limpeza", style=discord.ButtonStyle.danger)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         token = self.user.get_token()
         if not token:
@@ -533,13 +510,11 @@ class ButtonClean(discord.ui.Button):
         finally:
             self.cog.active_tasks.pop(task_id, None)
 
-# ---------- BOTÃO: BACKUP ----------
 class ButtonBackup(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="💾 Backup", style=discord.ButtonStyle.primary)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         token = self.user.get_token()
         if not token:
@@ -558,13 +533,11 @@ class ButtonBackup(discord.ui.Button):
         else:
             await msg.edit(content="❌ Nenhuma mensagem encontrada.")
 
-# ---------- BOTÃO: FARM ----------
 class ButtonFarm(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="⏰ Farm", style=discord.ButtonStyle.success)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         token = self.user.get_token()
         if not token:
@@ -580,14 +553,12 @@ class ButtonFarm(discord.ui.Button):
 class FarmModal(discord.ui.Modal, title="⏰ Configurar Farm"):
     message_input = discord.ui.TextInput(label="Mensagem", style=discord.TextStyle.paragraph, required=True)
     interval_input = discord.ui.TextInput(label="Intervalo (minutos)", style=discord.TextStyle.short, default="120", required=True)
-
     def __init__(self, user, cog, token, chat_id):
         super().__init__()
         self.user = user
         self.cog = cog
         self.token = token
         self.chat_id = chat_id
-
     async def on_submit(self, interaction: discord.Interaction):
         msg = self.message_input.value.strip()
         try:
@@ -609,13 +580,11 @@ class FarmModal(discord.ui.Modal, title="⏰ Configurar Farm"):
         asyncio.create_task(self.cog._perform_farm(interaction.user.id, self.token, self.chat_id, msg, interval_sec, stop_event))
         await interaction.response.send_message(f"✅ Farm iniciado (a cada {interval_min} min).", ephemeral=True)
 
-# ---------- BOTÃO: CALL ----------
 class ButtonCall(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="🎧 Call", style=discord.ButtonStyle.primary)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         token = self.user.get_token()
         if not token:
@@ -627,13 +596,11 @@ class ButtonCall(discord.ui.Button):
 class CallModal(discord.ui.Modal, title="🎧 Entrar na Call"):
     channel_input = discord.ui.TextInput(label="ID do Canal de Voz", style=discord.TextStyle.short, required=True)
     hours_input = discord.ui.TextInput(label="Horas", style=discord.TextStyle.short, default="2", required=True)
-
     def __init__(self, user, cog, token):
         super().__init__()
         self.user = user
         self.cog = cog
         self.token = token
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
             channel_id = int(self.channel_input.value.strip())
@@ -656,13 +623,11 @@ class CallModal(discord.ui.Modal, title="🎧 Entrar na Call"):
         finally:
             self.cog.active_tasks.pop(task_id, None)
 
-# ---------- BOTÃO: CLONAR PERFIL ----------
 class ButtonClone(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="🎭 Clonar Perfil", style=discord.ButtonStyle.secondary)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         token = self.user.get_token()
         if not token:
@@ -673,13 +638,11 @@ class ButtonClone(discord.ui.Button):
 
 class CloneModal(discord.ui.Modal, title="🎭 Clonar Perfil"):
     target_input = discord.ui.TextInput(label="ID do Usuário Alvo", style=discord.TextStyle.short, required=True)
-
     def __init__(self, user, cog, token):
         super().__init__()
         self.user = user
         self.cog = cog
         self.token = token
-
     async def on_submit(self, interaction: discord.Interaction):
         try:
             target_id = int(self.target_input.value.strip())
@@ -690,12 +653,10 @@ class CloneModal(discord.ui.Modal, title="🎭 Clonar Perfil"):
         msg = await interaction.followup.send("🔄 Clonando perfil...")
         await self.cog._perform_clone(interaction.user.id, self.token, target_id, msg)
 
-# ---------- BOTÃO: STATUS ----------
 class ButtonStatus(discord.ui.Button):
     def __init__(self, user):
         super().__init__(label="📋 Status", style=discord.ButtonStyle.secondary)
         self.user = user
-
     async def callback(self, interaction: discord.Interaction):
         data = self.user.data
         tokens = data.get('tokens', [])
@@ -707,13 +668,11 @@ class ButtonStatus(discord.ui.Button):
         embed.add_field(name="Mensagem Farm", value=data.get('farm_message', 'Nenhuma'), inline=False)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
-# ---------- BOTÕES: PARAR ----------
 class ButtonStopFarm(discord.ui.Button):
     def __init__(self, user, cog):
         super().__init__(label="⏹️ Parar Farm", style=discord.ButtonStyle.danger)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         task_id = f"farm_{interaction.user.id}"
         if task_id in self.cog.active_tasks:
@@ -729,7 +688,6 @@ class ButtonStopCall(discord.ui.Button):
         super().__init__(label="⏹️ Sair Call", style=discord.ButtonStyle.danger)
         self.user = user
         self.cog = cog
-
     async def callback(self, interaction: discord.Interaction):
         task_id = f"call_{interaction.user.id}"
         if task_id in self.cog.active_tasks:
@@ -738,8 +696,5 @@ class ButtonStopCall(discord.ui.Button):
         else:
             await interaction.response.send_message("❌ Nenhuma call ativa.", ephemeral=True)
 
-# ============================================================
-# SETUP
-# ============================================================
 async def setup(bot):
     await bot.add_cog(Panel(bot))
