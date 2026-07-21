@@ -108,8 +108,9 @@ class Panel(commands.Cog):
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    # ========== FUNÇÃO DE VOZ (SEM DAVEY) ==========
+    # ========== FUNÇÃO DE VOZ CORRIGIDA ==========
     async def join_voice(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
+        # A interação já foi deferida no modal
         guild = self.bot.get_guild(guild_id)
         if not guild:
             await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
@@ -124,23 +125,19 @@ class Panel(commands.Cog):
             return
 
         try:
-            vc = await channel.connect(timeout=30.0)
+            # Tenta conectar (requer PyNaCl instalado)
+            vc = await channel.connect(timeout=30.0, reconnect=True)
             self.voice_clients[interaction.user.id] = vc
             await interaction.followup.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.", ephemeral=True)
 
-            # Mantém a conexão por X horas (sem áudio, apenas keepalive)
-            # O Discord desconecta após ~5min de inatividade, então precisamos enviar dados.
-            # Vamos usar um loop que envia um "ping" via websocket (nativo do discord.py)
-            # Para manter a conexão, podemos tocar um áudio de silêncio (se ffmpeg disponível)
-            # Ou simplesmente esperar e reconectar se cair.
-            # Vamos usar o método mais simples: esperar e tentar manter viva.
-            # Se o bot for desconectado, reconecta.
+            # Mantém a conexão por X horas
+            # Como não temos áudio, o Discord desconecta após ~5min de inatividade.
+            # Para manter, podemos enviar um stream de silêncio (requer ffmpeg) ou apenas reconectar se cair.
+            # Vamos usar um loop que verifica a conexão a cada 30s e, se cair, tenta reconectar.
             start_time = asyncio.get_event_loop().time()
             while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
                 await asyncio.sleep(30)
-                # Verifica se ainda está conectado
                 if not vc.is_connected():
-                    # Tenta reconectar
                     try:
                         await vc.connect()
                     except:
@@ -148,8 +145,10 @@ class Panel(commands.Cog):
             if vc.is_connected():
                 await vc.disconnect()
                 await interaction.followup.send("🔇 Desconectado após o tempo programado.", ephemeral=True)
+        except discord.ClientException as e:
+            await interaction.followup.send(f"❌ Erro ao conectar: {e}", ephemeral=True)
         except Exception as e:
-            await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
+            await interaction.followup.send(f"❌ Erro inesperado: {e}", ephemeral=True)
 
 
 # ========== VIEW DO PAINEL ==========
@@ -189,14 +188,12 @@ class ActionSelect(discord.ui.Select):
             return
 
         value = self.values[0]
-        # ENCONTRA O LABEL DA OPÇÃO SELECIONADA
         selected_label = next((opt.label for opt in self.options if opt.value == value), value)
 
         embed = interaction.message.embeds[0]
         embed.add_field(name="⚡ Ação selecionada", value=f"`{selected_label}`", inline=False)
 
         view = ActionView(self.cog, self.user_id, self.config, value)
-        # CORRETO: usa interaction.response.edit_message (ainda não respondida)
         await interaction.response.edit_message(embed=embed, view=view)
 
 
@@ -421,7 +418,6 @@ class TokenModal(discord.ui.Modal, title="Configurar Token"):
             return
         save_user_config(self.user_id, token=self.token.value.strip())
         await interaction.response.send_message("✅ Token salvo!", ephemeral=True)
-        # Atualizar painel
         config = get_user_config(self.user_id)
         embed = self.cog._build_embed(interaction.user, config)
         view = PanelView(self.cog, self.user_id, config)
@@ -522,7 +518,6 @@ class FarmModal(discord.ui.Modal, title="Auto-Farm"):
 
         async def wrapper():
             await auto_farm(config['token'], config['channel_id'], msgs, interval_min=interval, jitter=5, repeat_count=repeat)
-            # Notificar quando terminar (se não for infinito)
             if repeat > 0:
                 try:
                     await interaction.followup.send(f"✅ Farm finalizado após {repeat} execuções.", ephemeral=True)
@@ -557,6 +552,7 @@ class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
         ok, msg = await clone_profile(config['token'], self.target_id.value.strip())
         await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
 
+# ========== MODAL DE VOZ CORRIGIDO ==========
 class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
     guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
     channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
@@ -575,10 +571,14 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call"):
             gid = int(self.guild_id.value.strip())
             cid = int(self.channel_id.value.strip())
             hrs = int(self.hours.value.strip())
-        except:
+        except ValueError:
             await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
             return
-        await interaction.response.defer(ephemeral=True)
+
+        # Defer imediatamente para evitar expiração (tempo limite de 15s)
+        await interaction.response.defer(ephemeral=True, thinking=True)
+
+        # Agora chama a função de voz com a interação já deferida
         await self.cog.join_voice(interaction, gid, cid, hrs)
 
 
