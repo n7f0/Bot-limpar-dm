@@ -1,212 +1,419 @@
 import asyncio
 import aiohttp
-import logging
-import json
 import websockets
 import socket
-import struct
+import json
+import logging
 import time
-import random
+import nacl.secret
+import nacl.utils
+import nacl.public
+import nacl.encoding
 import os
+import struct
+import base64
+import random
+import threading
+from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-voice_tasks = {}  # user_id -> asyncio.Task
+# ============================================================
+# CONSTANTES
+# ============================================================
+VOICE_GATEWAY_VERSION = 4
+OP_HELLO = 0
+OP_IDENTIFY = 1
+OP_SELECT_PROTOCOL = 2
+OP_READY = 3
+OP_HEARTBEAT = 4
+OP_SESSION_DESCRIPTION = 5
+OP_SPEAKING = 6
+OP_HEARTBEAT_ACK = 7
+OP_RESUME = 8
+OP_CLIENT_CONNECT = 9
+OP_CLIENT_DISCONNECT = 10
 
-async def get_user_info(token: str):
-    headers = {'Authorization': token}
-    async with aiohttp.ClientSession() as session:
-        async with session.get('https://discord.com/api/v9/users/@me', headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            return None
+# ============================================================
+# CLASSE PRINCIPAL
+# ============================================================
+class VoiceWSClient:
+    def __init__(self, token: str, guild_id: int, channel_id: int, hours: int, user_id: int):
+        self.token = token
+        self.guild_id = guild_id
+        self.channel_id = channel_id
+        self.hours = hours
+        self.user_id = user_id
+        self.gateway_url = None
+        self.session_id = None
+        self.voice_server = None
+        self.voice_token = None
+        self.endpoint = None
+        self.voice_ws = None
+        self.udp_socket = None
+        self.udp_ip = None
+        self.udp_port = None
+        self.udp_ssrc = random.randint(1, 2**32 - 1)
+        self.udp_secret_key = None
+        self.voice_conn = None
+        self.is_running = False
+        self.heartbeat_interval = 15
+        self.last_heartbeat = 0
 
-async def get_user_guilds(token: str):
-    headers = {'Authorization': token}
-    async with aiohttp.ClientSession() as session:
-        async with session.get('https://discord.com/api/v9/users/@me/guilds', headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            return []
-
-async def get_voice_state(token: str, guild_id: int, channel_id: int):
-    """Obtém o estado de voz atual do usuário no servidor."""
-    headers = {'Authorization': token}
-    url = f'https://discord.com/api/v9/guilds/{guild_id}/voice-states/@me'
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers=headers) as resp:
-            if resp.status == 200:
-                return await resp.json()
-            return None
-
-async def update_voice_state(token: str, guild_id: int, channel_id: int = None, self_mute: bool = False, self_deaf: bool = False):
-    """Atualiza o estado de voz do usuário (entra/sai da call)."""
-    headers = {
-        'Authorization': token,
-        'Content-Type': 'application/json'
-    }
-    url = f'https://discord.com/api/v9/guilds/{guild_id}/voice-states/@me'
-    payload = {
-        'channel_id': str(channel_id) if channel_id else None,
-        'self_mute': self_mute,
-        'self_deaf': self_deaf
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.patch(url, headers=headers, json=payload) as resp:
-            return resp.status == 204
-
-def udp_keepalive(sock, ssrc, address, interval=30):
-    """Envia pacotes UDP de keepalive para o servidor de voz."""
-    # Pacote de keepalive: 70 bytes de zeros (padrão do Discord)
-    packet = bytearray(70)
-    struct.pack_into('>I', packet, 0, ssrc)  # SSRC no início
-    while True:
+    async def run(self):
+        """Ponto de entrada principal."""
+        self.is_running = True
         try:
-            sock.sendto(packet, address)
-        except:
-            pass
-        time.sleep(interval)
+            # 1. Conecta ao gateway principal e obtém dados de voz
+            await self._connect_gateway()
+            if not self.voice_server or not self.voice_token or not self.endpoint:
+                logger.error("❌ Dados de voz não recebidos")
+                return
 
-async def connect_voice_ws(token: str, guild_id: int, channel_id: int, hours: int, user_id: int):
-    """
-    Conecta ao gateway de voz do Discord usando WebSocket e UDP.
-    Mantém a call por X horas enviando pacotes de keepalive e silêncio.
-    """
-    # 1. Valida token
-    user = await get_user_info(token)
-    if not user:
-        logger.error("❌ Token inválido")
-        return
+            # 2. Conecta ao gateway de voz
+            await self._connect_voice_gateway()
+            if not self.voice_ws:
+                return
 
-    # 2. Verifica se está no servidor
-    guilds = await get_user_guilds(token)
-    if str(guild_id) not in [g['id'] for g in guilds]:
-        logger.error(f"❌ Você não está no servidor {guild_id}")
-        return
+            # 3. Handshake UDP
+            await self._udp_handshake()
 
-    # 3. Entra na call via REST
-    success = await update_voice_state(token, guild_id, channel_id)
-    if not success:
-        logger.error("❌ Falha ao entrar na call via REST")
-        return
+            # 4. Mantém conexão por X horas
+            await self._keep_alive()
 
-    logger.info(f"✅ Entrou na call via REST, aguardando gateway de voz...")
+        except Exception as e:
+            logger.error(f"❌ Erro no VoiceWSClient: {e}")
+        finally:
+            await self.cleanup()
 
-    # 4. Aguarda o Discord fornecer o endpoint de voz (precisa de polling)
-    # O Discord envia um evento VOICE_SERVER_UPDATE via websocket principal, mas não temos acesso.
-    # Vamos tentar obter o estado de voz repetidamente.
-    voice_data = None
-    for _ in range(20):  # tenta por até 10 segundos
-        await asyncio.sleep(0.5)
-        state = await get_voice_state(token, guild_id)
-        if state and state.get('token'):
-            voice_data = state
-            break
+    # ============================================================
+    # 1. GATEWAY PRINCIPAL (para obter voz)
+    # ============================================================
+    async def _connect_gateway(self):
+        """Conecta ao gateway principal para receber eventos de voz."""
+        headers = {'Authorization': self.token}
+        async with aiohttp.ClientSession() as session:
+            # Obtém URL do gateway
+            async with session.get('https://discord.com/api/v9/gateway') as resp:
+                if resp.status != 200:
+                    logger.error(f"❌ Falha ao obter gateway: {resp.status}")
+                    return
+                data = await resp.json()
+                gateway_url = data.get('url', 'wss://gateway.discord.gg/')
+                gateway_url += '?v=9&encoding=json'
 
-    if not voice_data or not voice_data.get('token'):
-        logger.error("❌ Não foi possível obter o token de voz")
-        await update_voice_state(token, guild_id, channel_id=None)
-        return
+            # Conecta via WebSocket
+            async with websockets.connect(gateway_url) as ws:
+                # Aguarda HELLO
+                hello_msg = json.loads(await ws.recv())
+                if hello_msg.get('op') != OP_HELLO:
+                    logger.error("❌ HELLO não recebido")
+                    return
+                self.heartbeat_interval = hello_msg['d']['heartbeat_interval'] / 1000
 
-    # 5. Conecta ao gateway de voz via WebSocket
-    endpoint = voice_data.get('endpoint')
-    if not endpoint:
-        logger.error("❌ Endpoint de voz não encontrado")
-        await update_voice_state(token, guild_id, channel_id=None)
-        return
+                # Envia IDENTIFY
+                identify_payload = {
+                    'op': OP_IDENTIFY,
+                    'd': {
+                        'token': self.token,
+                        'intents': 1 << 9,  # GUILD_VOICE_STATES
+                        'properties': {
+                            'os': 'Linux',
+                            'browser': 'Chrome',
+                            'device': 'SelfBot'
+                        }
+                    }
+                }
+                await ws.send(json.dumps(identify_payload))
 
-    # Adiciona o protocolo wss://
-    if not endpoint.startswith('wss://'):
-        endpoint = f'wss://{endpoint}'
+                # Escuta eventos até receber VOICE_STATE_UPDATE e VOICE_SERVER_UPDATE
+                while True:
+                    message = await ws.recv()
+                    data = json.loads(message)
 
-    # 6. Handshake de voz
-    try:
-        async with websockets.connect(f'{endpoint}/?v=4', extra_headers={'Authorization': token}) as ws:
-            logger.info(f"✅ Conectado ao gateway de voz: {endpoint}")
+                    # Heartbeat
+                    if data.get('op') == OP_HEARTBEAT_ACK:
+                        continue
 
-            # Envia o payload de identificação
-            identify_payload = {
-                'op': 0,
+                    # Ready
+                    if data.get('t') == 'READY':
+                        self.session_id = data['d']['session_id']
+                        logger.info(f"✅ Session ID: {self.session_id}")
+
+                    # VOICE_STATE_UPDATE (guarda a session_id)
+                    elif data.get('t') == 'VOICE_STATE_UPDATE':
+                        d = data.get('d', {})
+                        if d.get('user_id') == self.user_id:
+                            self.session_id = d.get('session_id')
+                            logger.info(f"✅ Session ID (atualizado): {self.session_id}")
+
+                    # VOICE_SERVER_UPDATE (guarda endpoint e token)
+                    elif data.get('t') == 'VOICE_SERVER_UPDATE':
+                        d = data.get('d', {})
+                        if d.get('guild_id') == str(self.guild_id):
+                            self.voice_token = d.get('token')
+                            self.endpoint = d.get('endpoint')
+                            logger.info(f"✅ Endpoint de voz: {self.endpoint}")
+                            # Sai do loop quando tiver dados completos
+                            if self.voice_token and self.endpoint and self.session_id:
+                                break
+
+                    # Se já temos tudo, pode parar
+                    if self.voice_token and self.endpoint and self.session_id:
+                        break
+
+                # Encerra a conexão com o gateway principal
+                await ws.close()
+                logger.info("✅ Gateway principal desconectado")
+
+    # ============================================================
+    # 2. GATEWAY DE VOZ
+    # ============================================================
+    async def _connect_voice_gateway(self):
+        """Conecta ao gateway de voz."""
+        if not self.endpoint:
+            logger.error("❌ Endpoint de voz não disponível")
+            return
+
+        # Endpoint vem com porta, ex: "us-east-1.discord.gg"
+        ws_url = f"wss://{self.endpoint}/?v={VOICE_GATEWAY_VERSION}"
+        try:
+            self.voice_ws = await websockets.connect(ws_url)
+            logger.info(f"✅ Conectado ao gateway de voz: {ws_url}")
+
+            # Aguarda HELLO do voice
+            hello_msg = json.loads(await self.voice_ws.recv())
+            if hello_msg.get('op') != OP_HELLO:
+                logger.error("❌ HELLO não recebido do voice gateway")
+                return
+
+            # Envia IDENTIFY do voice
+            voice_identify = {
+                'op': OP_IDENTIFY,
                 'd': {
-                    'server_id': str(guild_id),
-                    'user_id': user['id'],
-                    'session_id': '',  # não temos, mas pode ser vazio
-                    'token': voice_data['token']
+                    'server_id': str(self.guild_id),
+                    'user_id': str(self.user_id),
+                    'session_id': self.session_id,
+                    'token': self.voice_token
                 }
             }
-            await ws.send(json.dumps(identify_payload))
+            await self.voice_ws.send(json.dumps(voice_identify))
+            logger.info("✅ Identify enviado para gateway de voz")
 
-            # Aguarda a resposta de ready
-            resp = await ws.recv()
-            data = json.loads(resp)
-
-            if data.get('op') != 2:
-                logger.error(f"❌ Falha no handshake: {data}")
-                await update_voice_state(token, guild_id, channel_id=None)
+            # Aguarda READY
+            ready_msg = json.loads(await self.voice_ws.recv())
+            if ready_msg.get('op') != OP_READY:
+                logger.error("❌ READY não recebido do voice gateway")
                 return
 
-            # Obtém informações UDP do servidor de voz
-            udp_data = data.get('d', {})
-            ip = udp_data.get('ip')
-            port = udp_data.get('port')
-            ssrc = udp_data.get('ssrc')
+            # Extrai dados do UDP
+            d = ready_msg.get('d', {})
+            self.udp_ip = d.get('ip')
+            self.udp_port = d.get('port')
+            self.udp_ssrc = d.get('ssrc', self.udp_ssrc)
+            self.udp_secret_key = d.get('secret_key')  # array de bytes?
+            logger.info(f"✅ UDP IP: {self.udp_ip}, Porta: {self.udp_port}, SSRC: {self.udp_ssrc}")
 
-            if not ip or not port or not ssrc:
-                logger.error("❌ Dados UDP incompletos")
-                await update_voice_state(token, guild_id, channel_id=None)
+        except Exception as e:
+            logger.error(f"❌ Erro ao conectar ao gateway de voz: {e}")
+            self.voice_ws = None
+
+    # ============================================================
+    # 3. HANDSHAKE UDP
+    # ============================================================
+    async def _udp_handshake(self):
+        """Realiza o handshake UDP com o servidor de voz."""
+        if not self.udp_ip or not self.udp_port:
+            logger.error("❌ Dados UDP não disponíveis")
+            return
+
+        try:
+            # Cria socket UDP
+            self.udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            self.udp_socket.setblocking(False)
+            self.udp_socket.settimeout(5.0)
+
+            # Envia pacote de descoberta (Discovery)
+            # Formato: [SSRC (4 bytes), 0x00000000 (4 bytes), 0x00000000 (4 bytes), 0x00000000 (4 bytes)]
+            discovery_packet = struct.pack('>IIII', self.udp_ssrc, 0, 0, 0)
+            self.udp_socket.sendto(discovery_packet, (self.udp_ip, self.udp_port))
+
+            # Recebe resposta
+            response, addr = self.udp_socket.recvfrom(1024)
+            # Resposta: [IP (string), Porta (unsigned short), SSRC]
+            # Formato: primeiro 4 bytes = endereço IP
+            ip = response[4:].decode('utf-8').split('\x00')[0]
+            port = struct.unpack('>H', response[2:4])[0] if len(response) > 4 else self.udp_port
+            ssrc = struct.unpack('>I', response[:4])[0] if len(response) >= 4 else self.udp_ssrc
+
+            logger.info(f"✅ UDP handshake concluído: IP={ip}, Porta={port}, SSRC={ssrc}")
+
+            # Envia SELECT_PROTOCOL para o gateway de voz
+            select_payload = {
+                'op': OP_SELECT_PROTOCOL,
+                'd': {
+                    'protocol': 'udp',
+                    'data': {
+                        'address': ip,
+                        'port': port,
+                        'mode': 'xsalsa20_poly1305'  # modo de criptografia
+                    }
+                }
+            }
+            await self.voice_ws.send(json.dumps(select_payload))
+            logger.info("✅ SELECT_PROTOCOL enviado")
+
+            # Aguarda SESSION_DESCRIPTION
+            session_desc = json.loads(await self.voice_ws.recv())
+            if session_desc.get('op') != OP_SESSION_DESCRIPTION:
+                logger.error("❌ SESSION_DESCRIPTION não recebido")
                 return
 
-            logger.info(f"🎧 Servidor de voz: {ip}:{port}, SSRC: {ssrc}")
+            # Extrai a chave de criptografia
+            secret_key = session_desc['d']['secret_key']
+            self.udp_secret_key = bytes(secret_key)
+            logger.info(f"✅ Chave secreta recebida (tamanho: {len(self.udp_secret_key)})")
 
-            # 7. Envia pacotes UDP de keepalive
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            address = (ip, port)
+            # Inicia o envio de heartbeat UDP
+            asyncio.create_task(self._udp_heartbeat())
 
-            # Inicia a thread de keepalive
-            import threading
-            keepalive_thread = threading.Thread(
-                target=udp_keepalive,
-                args=(sock, ssrc, address, 30),
-                daemon=True
-            )
-            keepalive_thread.start()
+        except Exception as e:
+            logger.error(f"❌ Erro no handshake UDP: {e}")
+            self.udp_socket = None
 
-            # 8. Mantém a conexão WebSocket ativa por X horas
-            start_time = time.time()
-            end_time = start_time + (hours * 3600)
+    # ============================================================
+    # 4. HEARTBEAT UDP
+    # ============================================================
+    async def _udp_heartbeat(self):
+        """Envia pacotes de heartbeat via UDP para manter a conexão."""
+        if not self.udp_socket:
+            return
 
-            while time.time() < end_time:
-                try:
-                    # Aguarda mensagens do gateway (opção, podemos apenas manter a conexão)
-                    await asyncio.wait_for(ws.recv(), timeout=30)
-                except asyncio.TimeoutError:
-                    # Envia um ping para manter a conexão ativa
-                    await ws.send(json.dumps({'op': 3, 'd': None}))  # heartbeart
-                except websockets.exceptions.ConnectionClosed:
-                    logger.warning("🔄 Conexão WebSocket fechada, reconectando...")
-                    # Tenta reconectar (simplificado)
-                    break
-                except Exception as e:
-                    logger.error(f"❌ Erro no WebSocket: {e}")
-                    break
+        # Pacote de heartbeat: [SSRC (4 bytes), timestamp (8 bytes), sequência (2 bytes)]
+        seq = 0
+        while self.is_running:
+            try:
+                # Timestamp atual (em milissegundos, 48 bits)
+                timestamp = int(time.time() * 1000) & 0xFFFFFFFFFFFF
+                packet = struct.pack('>IQH', self.udp_ssrc, timestamp, seq)
+                self.udp_socket.sendto(packet, (self.udp_ip, self.udp_port))
+                seq = (seq + 1) % 65536
+                await asyncio.sleep(5)  # a cada 5 segundos
+            except Exception as e:
+                logger.error(f"❌ Erro no heartbeat UDP: {e}")
+                break
 
-            # 9. Desconecta
-            sock.close()
-            await update_voice_state(token, guild_id, channel_id=None)
-            logger.info(f"🔇 Desconectado após {hours}h")
+    # ============================================================
+    # 5. KEEP ALIVE (principal)
+    # ============================================================
+    async def _keep_alive(self):
+        """Mantém a conexão viva por X horas."""
+        if not self.voice_ws:
+            return
 
-    except Exception as e:
-        logger.error(f"❌ Erro no WebSocket de voz: {e}")
-        await update_voice_state(token, guild_id, channel_id=None)
+        logger.info(f"🎧 Conectado e mantendo call por {self.hours}h")
+        start_time = time.time()
+        end_time = start_time + (self.hours * 3600)
 
-    # Remove a task
-    if user_id in voice_tasks:
-        del voice_tasks[user_id]
+        # Heartbeat do WebSocket
+        async def ws_heartbeat():
+            while self.is_running:
+                await asyncio.sleep(self.heartbeat_interval)
+                if self.voice_ws:
+                    try:
+                        await self.voice_ws.send(json.dumps({'op': OP_HEARTBEAT, 'd': int(time.time() * 1000)}))
+                    except:
+                        pass
+
+        # Inicia o heartbeat do WS
+        hb_task = asyncio.create_task(ws_heartbeat())
+
+        # Loop principal
+        while self.is_running and time.time() < end_time:
+            await asyncio.sleep(10)
+            # Verifica se ainda está conectado
+            if not self.voice_ws or self.voice_ws.closed:
+                logger.warning("🔄 Conexão WebSocket perdida, tentando reconectar...")
+                await self._reconnect_voice()
+                # Reseta o contador se reconectou
+                start_time = time.time()
+                end_time = start_time + (self.hours * 3600)
+
+        # Finaliza
+        hb_task.cancel()
+        logger.info("🔇 Tempo esgotado, desconectando...")
+        await self.cleanup()
+
+    async def _reconnect_voice(self):
+        """Tenta reconectar ao gateway de voz."""
+        try:
+            await self._connect_voice_gateway()
+            if self.voice_ws:
+                await self._udp_handshake()
+                logger.info("✅ Reconectado com sucesso")
+        except Exception as e:
+            logger.error(f"❌ Falha na reconexão: {e}")
+
+    # ============================================================
+    # 6. LIMPEZA
+    # ============================================================
+    async def cleanup(self):
+        """Limpa todos os recursos."""
+        self.is_running = False
+        if self.voice_ws:
+            await self.voice_ws.close()
+            self.voice_ws = None
+        if self.udp_socket:
+            self.udp_socket.close()
+            self.udp_socket = None
+        logger.info("✅ Recursos liberados")
+
+    # ============================================================
+    # 7. DESCONEXÃO FORÇADA
+    # ============================================================
+    async def disconnect(self):
+        """Desconecta a call imediatamente."""
+        await self.cleanup()
+
+
+# ============================================================
+# FUNÇÕES PÚBLICAS PARA O PAINEL
+# ============================================================
+voice_tasks = {}  # user_id -> asyncio.Task
+
+async def join_voice_websocket(token: str, guild_id: int, channel_id: int, hours: int, user_id: int):
+    """
+    Entra em call usando self-bot via WebSocket + UDP.
+    Mantém a conexão por X horas.
+    """
+    # Obtém o ID do usuário a partir do token
+    user_id_from_token = await _get_user_id(token)
+    if not user_id_from_token:
+        logger.error("❌ Não foi possível obter o ID do usuário")
+        return
+
+    client = VoiceWSClient(token, guild_id, channel_id, hours, user_id_from_token)
+    await client.run()
+
+async def _get_user_id(token: str) -> Optional[str]:
+    """Obtém o ID do usuário a partir do token."""
+    headers = {'Authorization': token}
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get('https://discord.com/api/v9/users/@me', headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data['id']
+        except:
+            pass
+    return None
 
 async def disconnect_user_voice(user_id: int):
-    """Cancela a task de voz."""
+    """Desconecta o self-bot da call."""
     if user_id in voice_tasks:
-        voice_tasks[user_id].cancel()
+        task = voice_tasks[user_id]
+        task.cancel()
         del voice_tasks[user_id]
+        logger.info(f"🔇 Desconectado para usuário {user_id}")
         return True
     return False
