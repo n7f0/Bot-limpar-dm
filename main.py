@@ -4,8 +4,15 @@ os.environ['DISCORD_VOICE_DRIVER'] = 'pynacl'
 
 import asyncio
 import logging
-import discord
-from discord.ext import commands
+
+# Verifica se o discord está disponível
+try:
+    import discord
+    from discord.ext import commands
+    print(f"✅ discord importado: {discord.__version__}")
+except ImportError as e:
+    print(f"❌ Erro ao importar discord: {e}")
+    exit(1)
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,7 +27,6 @@ intents.guilds = True
 intents.members = True
 intents.voice_states = True
 
-# Bot principal (para comandos slash)
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_cogs():
@@ -41,7 +47,6 @@ async def on_ready():
     except Exception as e:
         logging.error(f"❌ Erro ao sincronizar: {e}")
 
-# Comando de fallback para sincronizar
 @bot.command(name="sync")
 @commands.is_owner()
 async def sync_command(ctx):
