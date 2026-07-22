@@ -1,5 +1,5 @@
 import os
-# FORÇA O USO DO PyNaCl COMO DRIVER DE VOZ (para o bot)
+# FORÇA O USO DO PyNaCl COMO DRIVER DE VOZ
 os.environ['DISCORD_VOICE_DRIVER'] = 'pynacl'
 
 import asyncio
@@ -38,9 +38,18 @@ async def on_ready():
             synced = await bot.tree.sync(guild=guild)
             logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor '{guild.name}'")
         else:
-            logging.warning("⚠️ Bot não está em nenhum servidor.")
+            logging.warning("⚠️ Bot não está em nenhum servidor. Use !sync para sincronizar.")
     except Exception as e:
         logging.error(f"❌ Erro ao sincronizar: {e}")
+
+@bot.command(name="sync")
+@commands.is_owner()
+async def sync_command(ctx):
+    try:
+        synced = await bot.tree.sync(guild=ctx.guild)
+        await ctx.send(f"✅ {len(synced)} comando(s) sincronizado(s).")
+    except Exception as e:
+        await ctx.send(f"❌ Erro: {e}")
 
 async def main():
     await load_cogs()
