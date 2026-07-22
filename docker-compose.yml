@@ -2,13 +2,13 @@ version: '3.8'
 services:
   bot:
     build: .
-    container_name: nexzy-clear-bot
+    container_name: nexzy-clear-self
     restart: always
     network_mode: host
     dns:
       - 8.8.8.8
       - 1.1.1.1
     environment:
-      - BOT_TOKEN=${BOT_TOKEN}
+      - BOT_TOKEN=${BOT_TOKEN}   # Aqui você coloca o SEU TOKEN DE USUÁRIO
     volumes:
       - ./data:/app/data
