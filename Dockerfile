@@ -1,6 +1,6 @@
 FROM python:3.11-slim
 
-# Instala dependências de sistema (essenciais para compilar PyNaCl e outras)
+# Instala dependências de sistema para compilar PyNaCl e cffi
 RUN apt-get update && apt-get install -y \
     libsodium-dev \
     libsodium23 \
@@ -11,21 +11,16 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
+WORKDIR /app
+
 # Atualiza pip, setuptools e wheel
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel
 
-WORKDIR /app
+# Instala as dependências principais (aiohttp, criptografia, PyNaCl, etc.)
+RUN pip install --no-cache-dir aiohttp==3.9.1 cryptography==41.0.7 python-dateutil==2.8.2 PyNaCl==1.5.0 cffi==1.16.0
 
-# Copia o requirements
-COPY requirements.txt .
-
-# Instala as dependências em partes para identificar falhas
-RUN pip install --no-cache-dir aiohttp cryptography python-dateutil PyNaCl cffi setuptools wheel
-
-# Tenta instalar o discord.py-self do PyPI (versão mais estável)
-RUN pip install --no-cache-dir discord.py-self==2.3.2 || \
-    pip install --no-cache-dir discord.py-self==2.3.0 || \
-    pip install --no-cache-dir discord.py-self==2.2.0
+# Instala o discord.py-self diretamente do GitHub, SEM as dependências (já instalamos acima)
+RUN pip install --no-cache-dir git+https://github.com/SleepTheGod/discord.py-self.git --no-deps
 
 COPY . .
 
