@@ -1,5 +1,5 @@
 import os
-# Força o uso do PyNaCl para voz (mesmo em self‑bot)
+# FORÇA O USO DO PyNaCl COMO DRIVER DE VOZ (para o bot)
 os.environ['DISCORD_VOICE_DRIVER'] = 'pynacl'
 
 import asyncio
@@ -14,15 +14,13 @@ if not TOKEN:
     logging.error("❌ BOT_TOKEN não definido.")
     exit(1)
 
-# Intents para self‑bot (podem ser mais restritos, mas mantemos os mesmos)
 intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
 intents.voice_states = True
 
-# Self‑bot: o token é de usuário, então usamos `commands.Bot` normalmente
-bot = commands.Bot(command_prefix='!', intents=intents, self_bot=True)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def load_cogs():
     try:
@@ -33,10 +31,16 @@ async def load_cogs():
 
 @bot.event
 async def on_ready():
-    logging.info(f"✅ Self‑bot logado como {bot.user} (ID: {bot.user.id})")
-    # Sincronização de comandos não funciona para self‑bots (só slash em bots normais)
-    # Mas o painel usa botões, então não precisa de slash.
-    logging.info("⚠️ Comandos slash NÃO funcionam em self‑bots. Use o botão do painel.")
+    logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
+    try:
+        if bot.guilds:
+            guild = bot.guilds[0]
+            synced = await bot.tree.sync(guild=guild)
+            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor '{guild.name}'")
+        else:
+            logging.warning("⚠️ Bot não está em nenhum servidor.")
+    except Exception as e:
+        logging.error(f"❌ Erro ao sincronizar: {e}")
 
 async def main():
     await load_cogs()
