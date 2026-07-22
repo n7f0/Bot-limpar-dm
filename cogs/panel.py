@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands
+from discord import app_commands
 import logging
 import asyncio
 import sqlite3
@@ -11,7 +12,8 @@ from utils.helpers import (
     schedule_message,
     auto_farm,
     clone_profile,
-    get_user_id_from_token
+    get_user_id_from_token,
+    user_join_voice
 )
 
 logger = logging.getLogger(__name__)
@@ -81,71 +83,47 @@ class Panel(commands.Cog):
         init_db()
         self.farm_tasks = {}
         self.schedule_tasks = {}
-        self.voice_clients = {}
+        self.voice_tasks = {}
 
-    # ========== COMANDO COM PREFIXO (já que self‑bot não tem slash) ==========
-    @commands.command(name='painel')
-    async def painel_command(self, ctx):
-        """Abre o painel de controle."""
-        config = get_user_config(ctx.author.id)
-        embed = self._build_embed(ctx.author, config)
-        view = PanelView(self, ctx.author.id, config)
-        await ctx.send(embed=embed, view=view)
+    @app_commands.command(name="paineldm", description="Abre o painel de controle")
+    async def paineldm(self, interaction: discord.Interaction):
+        config = get_user_config(interaction.user.id)
+        embed = self._build_embed(interaction.user, config)
+        view = PanelView(self, interaction.user.id, config)
+        await interaction.response.send_message(embed=embed, view=view)
 
     def _build_embed(self, user, config):
         token_status = "✅ Configurado" if config['token'] else "❌ Não configurado"
         channel_status = f"✅ {config['channel_id']}" if config['channel_id'] else "❌ Não definido"
         embed = discord.Embed(
-            title="🖤 Nexzy Store Clear (Self‑Bot)",
+            title="🖤 Nexzy Store Clear",
             description="**Painel de Controle**\nSelecione uma ação no menu abaixo.",
             color=0x000000
         )
         embed.set_thumbnail(url=self.bot.user.display_avatar.url)
-        embed.add_field(name="🔑 Token (seu)", value=token_status, inline=True)
+        embed.add_field(name="🔑 Token", value=token_status, inline=True)
         embed.add_field(name="📌 Canal alvo", value=channel_status, inline=True)
-        embed.add_field(name="📊 Status", value="🟢 Self‑Bot Ativo", inline=True)
-        embed.set_footer(text="⚠️ Use por sua conta e risco")
+        embed.add_field(name="📊 Status", value="🟢 Operacional", inline=True)
+        embed.set_footer(text="Nexzy Store • v2.0 (Self-Bot Voice)")
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    # ========== FUNÇÃO DE VOZ (AGORA USANDO O TOKEN DO USUÁRIO) ==========
-    async def join_voice(self, ctx, guild_id: int, channel_id: int, hours: int):
-        """Conecta a conta do usuário (self‑bot) ao canal de voz."""
-        guild = self.bot.get_guild(guild_id)
-        if not guild:
-            await ctx.send("❌ Servidor não encontrado.")
-            return
-        channel = guild.get_channel(channel_id)
-        if not channel or not isinstance(channel, discord.VoiceChannel):
-            await ctx.send("❌ Canal de voz não encontrado.")
+    # ========== FUNÇÃO PARA INICIAR VOZ COM SELF-BOT ==========
+    async def start_voice_task(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
+        config = get_user_config(interaction.user.id)
+        if not config['token']:
+            await interaction.followup.send("❌ Você não configurou seu token de usuário.", ephemeral=True)
             return
 
-        if guild.voice_client:
-            await ctx.send("⚠️ Já estou em uma call neste servidor.")
-            return
+        # Cria uma task separada para o self-bot
+        async def voice_task():
+            await user_join_voice(config['token'], guild_id, channel_id, hours)
 
-        try:
-            vc = await channel.connect(timeout=30.0, reconnect=True)
-            self.voice_clients[ctx.author.id] = vc
-            await ctx.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.")
-
-            # Loop de keepalive (mesmo do bot normal)
-            start_time = asyncio.get_event_loop().time()
-            while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
-                await asyncio.sleep(30)
-                if not vc.is_connected():
-                    try:
-                        await vc.connect()
-                    except:
-                        pass
-            if vc.is_connected():
-                await vc.disconnect()
-                await ctx.send("🔇 Desconectado após o tempo programado.")
-        except Exception as e:
-            await ctx.send(f"❌ Erro: {e}")
+        task = asyncio.create_task(voice_task())
+        self.voice_tasks[interaction.user.id] = task
+        await interaction.followup.send(f"🎧 Conectando sua conta à call por {hours}h...", ephemeral=True)
 
 
-# ========== VIEW DO PAINEL (IDÊNTICA À ANTERIOR) ==========
 class PanelView(discord.ui.View):
     def __init__(self, cog, user_id, config):
         super().__init__(timeout=None)
@@ -167,7 +145,7 @@ class ActionSelect(discord.ui.Select):
             discord.SelectOption(label="⏰ Agendar Mensagem", value="schedule", description="Envia mensagem programada", emoji="📅"),
             discord.SelectOption(label="🔄 Auto-Farm", value="farm", description="Envia mensagens repetidamente", emoji="⚙️"),
             discord.SelectOption(label="🎭 Clonar Perfil", value="clone", description="Copia avatar e bio", emoji="👤"),
-            discord.SelectOption(label="🎧 Entrar em Call", value="voice", description="Conecta a canal de voz (SELF‑BOT)", emoji="🔊"),
+            discord.SelectOption(label="🎧 Entrar em Call (Sua Conta)", value="voice", description="Conecta SUA conta à call", emoji="🔊"),
         ]
         super().__init__(placeholder="Selecione uma ação...", min_values=1, max_values=1, options=options)
         self.cog = cog
@@ -209,7 +187,6 @@ class ActionView(discord.ui.View):
         self.add_item(BackButton(cog, user_id))
 
 
-# ========== BOTÕES DE CONFIG ==========
 class ConfigTokenButton(discord.ui.Button):
     def __init__(self, cog, user_id):
         super().__init__(label="🔑 Token", style=discord.ButtonStyle.primary, custom_id="config_token")
@@ -267,8 +244,6 @@ class RefreshButton(discord.ui.Button):
         view = PanelView(self.cog, self.user_id, config)
         await interaction.response.edit_message(embed=embed, view=view)
 
-
-# ========== BOTÕES DE AÇÃO ==========
 class StartStealthButton(discord.ui.Button):
     def __init__(self, cog, user_id):
         super().__init__(label="🧹 Iniciar Limpeza", style=discord.ButtonStyle.danger, custom_id="start_stealth")
@@ -362,7 +337,7 @@ class CloneButton(discord.ui.Button):
 
 class VoiceButton(discord.ui.Button):
     def __init__(self, cog, user_id):
-        super().__init__(label="🎧 Entrar em Call (Self)", style=discord.ButtonStyle.primary, custom_id="join_voice")
+        super().__init__(label="🎧 Entrar em Call (Sua Conta)", style=discord.ButtonStyle.primary, custom_id="join_voice")
         self.cog = cog
         self.user_id = user_id
 
@@ -389,9 +364,8 @@ class BackButton(discord.ui.Button):
         await interaction.response.edit_message(embed=embed, view=view)
 
 
-# ========== MODAIS ==========
-class TokenModal(discord.ui.Modal, title="Configurar Token (Self)"):
-    token = discord.ui.TextInput(label="Token do usuário", placeholder="Cole aqui", required=True, min_length=30)
+class TokenModal(discord.ui.Modal, title="Configurar Token da Sua Conta"):
+    token = discord.ui.TextInput(label="Token do Usuário", placeholder="Cole aqui o token da sua conta", required=True, min_length=30)
 
     def __init__(self, cog, user_id):
         super().__init__()
@@ -403,13 +377,13 @@ class TokenModal(discord.ui.Modal, title="Configurar Token (Self)"):
             await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
             return
         save_user_config(self.user_id, token=self.token.value.strip())
-        await interaction.response.send_message("✅ Token salvo! (Self‑Bot)", ephemeral=True)
+        await interaction.response.send_message("✅ Token da sua conta salvo!", ephemeral=True)
         config = get_user_config(self.user_id)
         embed = self.cog._build_embed(interaction.user, config)
         view = PanelView(self.cog, self.user_id, config)
         await interaction.message.edit(embed=embed, view=view)
 
-class ChannelModal(discord.ui.Modal, title="Configurar Canal"):
+class ChannelModal(discord.ui.Modal, title="Configurar Canal Alvo"):
     channel_id = discord.ui.TextInput(label="ID do canal", placeholder="Digite o ID", required=True, min_length=17)
 
     def __init__(self, cog, user_id):
@@ -532,7 +506,7 @@ class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
         ok, msg = await clone_profile(config['token'], self.target_id.value.strip())
         await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
 
-class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self)"):
+class VoiceModal(discord.ui.Modal, title="Entrar em Call com Sua Conta"):
     guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
     channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
     hours = discord.ui.TextInput(label="Horas", placeholder="2", required=True)
@@ -553,12 +527,15 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self)"):
         except ValueError:
             await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
             return
+
+        # Verifica se o token está configurado
+        config = get_user_config(self.user_id)
+        if not config['token']:
+            await interaction.response.send_message("❌ Configure seu token de usuário primeiro.", ephemeral=True)
+            return
+
         await interaction.response.defer(ephemeral=True, thinking=True)
-        # Precisamos do ctx para enviar mensagens, mas estamos em uma interação.
-        # Vamos criar um "ctx" simulado para usar a função join_voice.
-        # Alternativa: criar um método que aceita interaction.
-        # Vou adaptar: criar uma função que usa interaction.
-        await self.cog.join_voice_interaction(interaction, gid, cid, hrs)
+        await self.cog.start_voice_task(interaction, gid, cid, hrs)
 
 
 class ConfirmView(discord.ui.View):
@@ -595,46 +572,6 @@ class ConfirmView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         await interaction.edit_original_response(view=self)
-
-
-# ========== FUNÇÃO DE VOZ PARA SELF‑BOT (USANDO INTERACTION) ==========
-async def join_voice_interaction(self, interaction, guild_id, channel_id, hours):
-    guild = self.bot.get_guild(guild_id)
-    if not guild:
-        await interaction.followup.send("❌ Servidor não encontrado.", ephemeral=True)
-        return
-    channel = guild.get_channel(channel_id)
-    if not channel or not isinstance(channel, discord.VoiceChannel):
-        await interaction.followup.send("❌ Canal de voz não encontrado.", ephemeral=True)
-        return
-
-    if guild.voice_client:
-        await interaction.followup.send("⚠️ Já estou em uma call neste servidor.", ephemeral=True)
-        return
-
-    try:
-        vc = await channel.connect(timeout=30.0, reconnect=True)
-        self.voice_clients[interaction.user.id] = vc
-        await interaction.followup.send(f"🎧 Conectado ao canal `{channel.name}` por {hours}h.", ephemeral=True)
-
-        # Keepalive loop
-        start_time = asyncio.get_event_loop().time()
-        while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
-            await asyncio.sleep(30)
-            if not vc.is_connected():
-                try:
-                    await vc.connect()
-                except:
-                    pass
-        if vc.is_connected():
-            await vc.disconnect()
-            await interaction.followup.send("🔇 Desconectado após o tempo programado.", ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ Erro: {e}", ephemeral=True)
-
-
-# Adiciona o método à classe Panel
-Panel.join_voice_interaction = join_voice_interaction
 
 
 async def setup(bot):
