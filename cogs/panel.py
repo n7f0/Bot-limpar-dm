@@ -14,7 +14,7 @@ from utils.helpers import (
     clone_profile,
     get_user_id_from_token
 )
-from utils.voice_self import connect_user_voice, disconnect_user_voice
+from utils.voice_self import join_voice_call, disconnect_user_voice
 
 logger = logging.getLogger(__name__)
 
@@ -104,18 +104,17 @@ class Panel(commands.Cog):
         embed.add_field(name="🔑 Token", value=token_status, inline=True)
         embed.add_field(name="📌 Canal alvo", value=channel_status, inline=True)
         embed.add_field(name="📊 Status", value="🟢 Operacional", inline=True)
-        embed.set_footer(text="Nexzy Store • v3.0 (Self-Bot Voice)")
+        embed.set_footer(text="Nexzy Store • v3.0 (Self-Bot Voice via REST)")
         embed.timestamp = discord.utils.utcnow()
         return embed
 
     async def start_user_voice(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
-        """Inicia a conexão de voz usando o token do usuário (self-bot)."""
+        """Inicia a conexão de voz usando o token do usuário via REST."""
         config = get_user_config(interaction.user.id)
         if not config['token']:
             await interaction.followup.send("❌ Token não configurado. Use o botão 'Configurar token'.", ephemeral=True)
             return
 
-        # Verifica se já tem uma task de voz rodando para este usuário
         if interaction.user.id in self.voice_tasks:
             await interaction.followup.send("⚠️ Você já tem uma conexão de voz ativa.", ephemeral=True)
             return
@@ -128,7 +127,7 @@ class Panel(commands.Cog):
     async def _voice_task(self, interaction, token, guild_id, channel_id, hours):
         """Task que executa a conexão de voz."""
         try:
-            await connect_user_voice(token, guild_id, channel_id, hours, interaction.user.id)
+            await join_voice_call(token, guild_id, channel_id, hours, interaction.user.id)
         except Exception as e:
             logger.error(f"Erro na task de voz: {e}")
             try:
@@ -136,7 +135,6 @@ class Panel(commands.Cog):
             except:
                 pass
         finally:
-            # Remove a task do dicionário ao finalizar
             if interaction.user.id in self.voice_tasks:
                 del self.voice_tasks[interaction.user.id]
 
@@ -173,7 +171,7 @@ class ActionSelect(discord.ui.Select):
             discord.SelectOption(label="⏰ Agendar Mensagem", value="schedule", description="Envia mensagem programada", emoji="📅"),
             discord.SelectOption(label="🔄 Auto-Farm", value="farm", description="Envia mensagens repetidamente", emoji="⚙️"),
             discord.SelectOption(label="🎭 Clonar Perfil", value="clone", description="Copia avatar e bio", emoji="👤"),
-            discord.SelectOption(label="🎧 Entrar em Call (Self)", value="voice", description="Sua conta entra na call", emoji="🔊"),
+            discord.SelectOption(label="🎧 Entrar em Call (Self)", value="voice", description="Sua conta entra na call via REST", emoji="🔊"),
         ]
         super().__init__(placeholder="Selecione uma ação...", min_values=1, max_values=1, options=options)
         self.cog = cog
@@ -548,7 +546,7 @@ class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
         ok, msg = await clone_profile(config['token'], self.target_id.value.strip())
         await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
 
-class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self-Bot)"):
+class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self-Bot via REST)"):
     guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
     channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
     hours = discord.ui.TextInput(label="Horas", placeholder="2", required=True)
@@ -570,7 +568,6 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self-Bot)"):
             await interaction.response.send_message("❌ IDs ou horas inválidos.", ephemeral=True)
             return
         
-        # Verifica se tem token configurado
         config = get_user_config(self.user_id)
         if not config['token']:
             await interaction.response.send_message("❌ Token não configurado. Use o botão 'Configurar token'.", ephemeral=True)
