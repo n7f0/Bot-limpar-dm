@@ -1,4 +1,3 @@
-git+https://github.com/SleepTheGod/discord.py-self.git
 aiohttp>=3.9.0
 cryptography>=39.0.0
 python-dateutil>=2.8.2
