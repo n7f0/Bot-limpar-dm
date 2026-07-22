@@ -18,9 +18,16 @@ WORKDIR /app
 
 COPY requirements.txt .
 
-# Instala as dependências em duas etapas para evitar conflitos
-RUN pip install --no-cache-dir aiohttp cryptography python-dateutil PyNaCl cffi
-RUN pip install --no-cache-dir discord.py-self==2.3.2
+# Instala as dependências base primeiro (com cffi e PyNaCl)
+RUN pip install --no-cache-dir cffi>=1.15.0
+RUN pip install --no-cache-dir PyNaCl>=1.5.0
+RUN pip install --no-cache-dir aiohttp cryptography python-dateutil
+
+# Instala o discord.py-self do GitHub sem dependências
+RUN pip install --no-cache-dir --no-deps git+https://github.com/SleepTheGod/discord.py-self.git
+
+# Instala as dependências restantes do discord.py-self (se houver)
+RUN pip install --no-cache-dir discord.py-self[docs] 2>/dev/null || true
 
 COPY . .
 
