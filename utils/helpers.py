@@ -5,9 +5,12 @@ import random
 import os
 import time
 import base64
+import discord
+from discord.ext import commands
 
 logger = logging.getLogger(__name__)
 
+# ========== OBTER ID DO USUÁRIO ==========
 async def get_user_id_from_token(token: str) -> str:
     headers = {'Authorization': token}
     async with aiohttp.ClientSession() as session:
@@ -20,6 +23,7 @@ async def get_user_id_from_token(token: str) -> str:
             pass
     return None
 
+# ========== LIMPEZA FURTIVA (com token do usuário) ==========
 async def stealth_clear(token: str, channel_id: int, limit: int = 150):
     user_id = await get_user_id_from_token(token)
     if not user_id:
@@ -82,6 +86,7 @@ async def stealth_clear(token: str, channel_id: int, limit: int = 150):
 
     return deleted, failed
 
+# ========== BACKUP STEALTH ==========
 async def stealth_backup(token: str, channel_id: int, limit: int = 3000):
     user_id = await get_user_id_from_token(token)
     if not user_id:
@@ -127,6 +132,7 @@ async def stealth_backup(token: str, channel_id: int, limit: int = 3000):
             f.write(f"[{msg['timestamp']}] {msg['author']['username']}: {msg.get('content', '')}\n")
     return filename, len(messages)
 
+# ========== AGENDAR MENSAGEM ==========
 async def schedule_message(token: str, channel_id: int, content: str, minutes: int):
     await asyncio.sleep(minutes * 60)
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
@@ -139,6 +145,7 @@ async def schedule_message(token: str, channel_id: int, content: str, minutes: i
         async with session.post(send_url, headers=headers, json=payload) as resp:
             return resp.status == 200
 
+# ========== AUTO-FARM ==========
 async def auto_farm(token: str, channel_id: str, messages: list, interval_min: int = 15, jitter: int = 5, repeat_count: int = 0):
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     async with aiohttp.ClientSession() as session:
@@ -165,6 +172,7 @@ async def auto_farm(token: str, channel_id: str, messages: list, interval_min: i
             jitter_seconds = random.randint(0, jitter * 60)
             await asyncio.sleep(base_interval * 60 + jitter_seconds)
 
+# ========== CLONAR PERFIL ==========
 async def clone_profile(token: str, target_user_id: str):
     headers = {'Authorization': token, 'Content-Type': 'application/json'}
     async with aiohttp.ClientSession() as session:
@@ -191,3 +199,64 @@ async def clone_profile(token: str, target_user_id: str):
                 pass
 
         return True, "Perfil clonado (avatar e biografia)"
+
+# ========== ENTRAR EM CALL COMO SELF-BOT ==========
+async def self_join_voice(user_token: str, guild_id: int, channel_id: int, hours: int):
+    """
+    Usa o token do usuário para conectar-se a um canal de voz.
+    Isso é um self-bot e viola os ToS do Discord.
+    """
+    from discord.ext.self import Bot as SelfBot
+    from discord import Intents
+
+    # Cria um cliente self-bot
+    intents = Intents.default()
+    intents.voice_states = True
+    intents.guilds = True
+    intents.message_content = True
+
+    self_bot = SelfBot(command_prefix='!', intents=intents, self_bot=True)
+
+    @self_bot.event
+    async def on_ready():
+        logger.info(f"✅ Self-bot logado como {self_bot.user} (ID: {self_bot.user.id})")
+        guild = self_bot.get_guild(guild_id)
+        if not guild:
+            logger.error("❌ Servidor não encontrado.")
+            await self_bot.close()
+            return
+        channel = guild.get_channel(channel_id)
+        if not channel or not isinstance(channel, discord.VoiceChannel):
+            logger.error("❌ Canal de voz não encontrado.")
+            await self_bot.close()
+            return
+
+        try:
+            vc = await channel.connect(timeout=30.0, reconnect=True)
+            logger.info(f"🎧 Conectado ao canal {channel.name}")
+            start_time = asyncio.get_event_loop().time()
+            while (asyncio.get_event_loop().time() - start_time) < hours * 3600:
+                await asyncio.sleep(30)
+                if not vc.is_connected():
+                    try:
+                        await vc.connect()
+                    except:
+                        pass
+            if vc.is_connected():
+                await vc.disconnect()
+                logger.info("🔇 Desconectado após o tempo programado.")
+            await self_bot.close()
+        except Exception as e:
+            logger.error(f"❌ Erro ao conectar: {e}")
+            await self_bot.close()
+
+    try:
+        await self_bot.start(user_token)
+    except Exception as e:
+        logger.error(f"❌ Erro ao iniciar self-bot: {e}")
+
+# ========== FUNÇÃO DE CALL QUE USA SELF-BOT ==========
+async def user_join_voice(user_token: str, guild_id: int, channel_id: int, hours: int):
+    """Wrapper para iniciar o self-bot em uma task separada."""
+    # Executa em uma task separada para não bloquear o bot principal
+    await self_join_voice(user_token, guild_id, channel_id, hours)
