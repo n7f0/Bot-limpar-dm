@@ -29,13 +29,13 @@ async def load_cogs():
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    try:
-        if bot.guilds:
-            guild = bot.guilds[0]
+    # Sincroniza com o primeiro servidor (ou um específico)
+    for guild in bot.guilds:
+        try:
             synced = await bot.tree.sync(guild=guild)
-            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor '{guild.name}'")
-    except Exception as e:
-        logging.error(f"❌ Erro ao sincronizar: {e}")
+            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor '{guild.name}' (ID: {guild.id})")
+        except Exception as e:
+            logging.error(f"❌ Erro ao sincronizar com {guild.name}: {e}")
 
 @bot.command(name="sync")
 @commands.is_owner()
