@@ -2,15 +2,28 @@ import asyncio
 import aiohttp
 import logging
 import json
-import websockets
-import time
-import random
 
 logger = logging.getLogger(__name__)
 
-# Armazena tarefas de voz ativas
 voice_tasks = {}
-voice_ws = {}  # user_id -> websocket
+
+async def get_user_info(token: str):
+    """Obtém informações do usuário para validar o token."""
+    headers = {'Authorization': token}
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://discord.com/api/v9/users/@me', headers=headers) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return None
+
+async def get_user_guilds(token: str):
+    """Lista os servidores do usuário para validar se ele está no servidor."""
+    headers = {'Authorization': token}
+    async with aiohttp.ClientSession() as session:
+        async with session.get('https://discord.com/api/v9/users/@me/guilds', headers=headers) as resp:
+            if resp.status == 200:
+                return await resp.json()
+            return []
 
 async def join_voice_call(token: str, guild_id: int, channel_id: int, hours: int, user_id: int):
     """
@@ -22,8 +35,28 @@ async def join_voice_call(token: str, guild_id: int, channel_id: int, hours: int
         'Content-Type': 'application/json'
     }
 
+    # 1. Valida o token e obtém informações do usuário
+    user = await get_user_info(token)
+    if not user:
+        logger.error("❌ Token inválido ou expirado. Obtenha um novo token.")
+        return
+
+    logger.info(f"✅ Token válido para {user['username']}#{user.get('discriminator', '0')} (ID: {user['id']})")
+
+    # 2. Verifica se o usuário está no servidor
+    guilds = await get_user_guilds(token)
+    guild_ids = [g['id'] for g in guilds]
+    if str(guild_id) not in guild_ids:
+        logger.error(f"❌ Você não está no servidor {guild_id}. Verifique o ID.")
+        return
+
+    logger.info(f"✅ Você está no servidor {guild_id}")
+
+    # 3. Verifica se o canal de voz existe (tenta obter informações do canal)
+    # Não há uma rota direta para obter um canal específico sem permissões de bot,
+    # mas podemos tentar entrar na call e capturar o erro.
     async with aiohttp.ClientSession() as session:
-        # 1. Entra no canal de voz via REST
+        # 4. Tenta entrar no canal de voz
         url = f'https://discord.com/api/v9/guilds/{guild_id}/voice-states/@me'
         payload = {'channel_id': str(channel_id)}
         
@@ -39,26 +72,19 @@ async def join_voice_call(token: str, guild_id: int, channel_id: int, hours: int
             logger.error(f"❌ Erro ao entrar na call: {e}")
             return
 
-        # 2. Mantém a conexão ativa por X horas (keepalive via WebSocket da voz)
-        # O Discord desconecta após ~5min de inatividade, então precisamos enviar pacotes.
-        # Vamos usar um loop que reconecta se cair.
-        
-        start_time = time.time()
+        # 5. Mantém a conexão ativa por X horas
+        start_time = asyncio.get_event_loop().time()
         end_time = start_time + (hours * 3600)
 
-        while time.time() < end_time:
-            # Simula um keepalive enviando um "ping" via REST (não é perfeito, mas ajuda)
-            # Opção: enviar um request para /voice/keepalive (não existe)
-            # Então vamos apenas esperar e reconectar se cair
+        while asyncio.get_event_loop().time() < end_time:
             await asyncio.sleep(30)
             
             # Verifica se ainda está na call (tenta obter o estado de voz)
             try:
-                async with session.get(f'https://discord.com/api/v9/guilds/{guild_id}/voice-states/@me', headers=headers) as resp:
+                async with session.get(url, headers=headers) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data.get('channel_id') != str(channel_id):
-                            # Caiu da call, reconecta
                             logger.warning("🔄 Reconectando à call...")
                             async with session.patch(url, headers=headers, json=payload) as reconnect:
                                 if reconnect.status != 204:
@@ -68,7 +94,7 @@ async def join_voice_call(token: str, guild_id: int, channel_id: int, hours: int
             except Exception as e:
                 logger.error(f"❌ Erro no keepalive: {e}")
 
-        # Sai da call após o tempo
+        # 6. Sai da call após o tempo
         try:
             async with session.patch(url, headers=headers, json={'channel_id': None}) as resp:
                 if resp.status == 204:
@@ -81,12 +107,9 @@ async def join_voice_call(token: str, guild_id: int, channel_id: int, hours: int
             del voice_tasks[user_id]
 
 async def disconnect_user_voice(user_id: int):
-    """Desconecta o usuário da call."""
-    # Cancela a task se estiver rodando
+    """Desconecta o usuário da call (apenas cancela a task)."""
     if user_id in voice_tasks:
         voice_tasks[user_id].cancel()
         del voice_tasks[user_id]
-    
-    # Tenta sair da call via REST (precisa do token, mas não temos aqui...)
-    # Vamos apenas cancelar a task e ela sairá sozinha.
-    return True
+        return True
+    return False
