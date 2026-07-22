@@ -1,18 +1,8 @@
 import os
-# FORÇA O USO DO PyNaCl COMO DRIVER DE VOZ
-os.environ['DISCORD_VOICE_DRIVER'] = 'pynacl'
-
 import asyncio
 import logging
-
-# Verifica se o discord está disponível
-try:
-    import discord
-    from discord.ext import commands
-    print(f"✅ discord importado: {discord.__version__}")
-except ImportError as e:
-    print(f"❌ Erro ao importar discord: {e}")
-    exit(1)
+import discord
+from discord.ext import commands
 
 logging.basicConfig(level=logging.INFO)
 
