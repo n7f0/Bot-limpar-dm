@@ -1,6 +1,5 @@
 FROM python:3.11-slim
 
-# Instala dependências de sistema
 RUN apt-get update && apt-get install -y \
     libsodium-dev \
     libsodium23 \
@@ -11,13 +10,12 @@ RUN apt-get update && apt-get install -y \
     git \
     && rm -rf /var/lib/apt/lists/*
 
-# Atualiza pip, setuptools e wheel
-RUN pip install --no-cache-dir --upgrade pip setuptools wheel
-
 WORKDIR /app
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Instala o discord.py-self e outras dependências direto
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir git+https://github.com/SleepTheGod/discord.py-self.git && \
+    pip install --no-cache-dir aiohttp cryptography python-dateutil PyNaCl cffi
 
 COPY . .
 
