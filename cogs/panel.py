@@ -14,7 +14,7 @@ from utils.helpers import (
     clone_profile,
     get_user_id_from_token
 )
-from utils.voice_self import join_voice_call, disconnect_user_voice
+from utils.voice_ws import join_voice_ws, disconnect_voice_ws
 
 logger = logging.getLogger(__name__)
 
@@ -84,6 +84,7 @@ class Panel(commands.Cog):
         self.farm_tasks = {}
         self.schedule_tasks = {}
         self.voice_tasks = {}  # user_id -> asyncio.Task
+        self.voice_instances = {}  # user_id -> VoiceWebSocket
 
     @app_commands.command(name="paineldm", description="Abre o painel de controle")
     async def paineldm(self, interaction: discord.Interaction):
@@ -104,12 +105,12 @@ class Panel(commands.Cog):
         embed.add_field(name="🔑 Token", value=token_status, inline=True)
         embed.add_field(name="📌 Canal alvo", value=channel_status, inline=True)
         embed.add_field(name="📊 Status", value="🟢 Operacional", inline=True)
-        embed.set_footer(text="Nexzy Store • v3.0 (Self-Bot Voice via REST)")
+        embed.set_footer(text="Nexzy Store • v3.0 (Self-Bot Voice WS)")
         embed.timestamp = discord.utils.utcnow()
         return embed
 
-    async def start_user_voice(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
-        """Inicia a conexão de voz usando o token do usuário via REST."""
+    async def start_user_voice_ws(self, interaction: discord.Interaction, guild_id: int, channel_id: int, hours: int):
+        """Inicia a conexão de voz via WebSocket (self-bot)"""
         config = get_user_config(interaction.user.id)
         if not config['token']:
             await interaction.followup.send("❌ Token não configurado. Use o botão 'Configurar token'.", ephemeral=True)
@@ -119,17 +120,16 @@ class Panel(commands.Cog):
             await interaction.followup.send("⚠️ Você já tem uma conexão de voz ativa.", ephemeral=True)
             return
 
-        # Cria a task assíncrona
-        task = asyncio.create_task(self._voice_task(interaction, config['token'], guild_id, channel_id, hours))
+        task = asyncio.create_task(self._voice_ws_task(interaction, config['token'], guild_id, channel_id, hours))
         self.voice_tasks[interaction.user.id] = task
-        await interaction.followup.send(f"🎧 Conectando à call por {hours}h...", ephemeral=True)
+        await interaction.followup.send(f"🎧 Conectando à call via WebSocket por {hours}h...", ephemeral=True)
 
-    async def _voice_task(self, interaction, token, guild_id, channel_id, hours):
-        """Task que executa a conexão de voz."""
+    async def _voice_ws_task(self, interaction, token, guild_id, channel_id, hours):
+        """Task que executa a conexão via WebSocket"""
         try:
-            await join_voice_call(token, guild_id, channel_id, hours, interaction.user.id)
+            await join_voice_ws(token, guild_id, channel_id, hours, interaction.user.id)
         except Exception as e:
-            logger.error(f"Erro na task de voz: {e}")
+            logger.error(f"Erro na task de voz WS: {e}")
             try:
                 await interaction.followup.send(f"❌ Erro na voz: {e}", ephemeral=True)
             except:
@@ -138,12 +138,12 @@ class Panel(commands.Cog):
             if interaction.user.id in self.voice_tasks:
                 del self.voice_tasks[interaction.user.id]
 
-    async def stop_user_voice(self, interaction: discord.Interaction):
-        """Para a conexão de voz do usuário."""
+    async def stop_user_voice_ws(self, interaction: discord.Interaction):
+        """Para a conexão de voz via WebSocket"""
         task = self.voice_tasks.get(interaction.user.id)
         if task:
             task.cancel()
-            await disconnect_user_voice(interaction.user.id)
+            await disconnect_voice_ws(interaction.user.id)
             del self.voice_tasks[interaction.user.id]
             await interaction.response.send_message("🔇 Desconectado da call.", ephemeral=True)
         else:
@@ -171,7 +171,7 @@ class ActionSelect(discord.ui.Select):
             discord.SelectOption(label="⏰ Agendar Mensagem", value="schedule", description="Envia mensagem programada", emoji="📅"),
             discord.SelectOption(label="🔄 Auto-Farm", value="farm", description="Envia mensagens repetidamente", emoji="⚙️"),
             discord.SelectOption(label="🎭 Clonar Perfil", value="clone", description="Copia avatar e bio", emoji="👤"),
-            discord.SelectOption(label="🎧 Entrar em Call (Self)", value="voice", description="Sua conta entra na call via REST", emoji="🔊"),
+            discord.SelectOption(label="🎧 Entrar em Call (Self-WS)", value="voice_ws", description="Sua conta entra via WebSocket", emoji="🔊"),
         ]
         super().__init__(placeholder="Selecione uma ação...", min_values=1, max_values=1, options=options)
         self.cog = cog
@@ -208,9 +208,9 @@ class ActionView(discord.ui.View):
             self.add_item(StopFarmButton(cog, user_id))
         elif action == "clone":
             self.add_item(CloneButton(cog, user_id))
-        elif action == "voice":
-            self.add_item(VoiceButton(cog, user_id))
-            self.add_item(StopVoiceButton(cog, user_id))
+        elif action == "voice_ws":
+            self.add_item(VoiceWSButton(cog, user_id))
+            self.add_item(StopVoiceWSButton(cog, user_id))
         self.add_item(BackButton(cog, user_id))
 
 
@@ -363,9 +363,9 @@ class CloneButton(discord.ui.Button):
         modal = CloneModal(self.cog, self.user_id)
         await interaction.response.send_modal(modal)
 
-class VoiceButton(discord.ui.Button):
+class VoiceWSButton(discord.ui.Button):
     def __init__(self, cog, user_id):
-        super().__init__(label="🎧 Entrar em Call (Self)", style=discord.ButtonStyle.success, custom_id="join_voice")
+        super().__init__(label="🎧 Entrar em Call (WS)", style=discord.ButtonStyle.success, custom_id="voice_ws")
         self.cog = cog
         self.user_id = user_id
 
@@ -373,12 +373,12 @@ class VoiceButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
             return
-        modal = VoiceModal(self.cog, self.user_id)
+        modal = VoiceWSModal(self.cog, self.user_id)
         await interaction.response.send_modal(modal)
 
-class StopVoiceButton(discord.ui.Button):
+class StopVoiceWSButton(discord.ui.Button):
     def __init__(self, cog, user_id):
-        super().__init__(label="🔇 Sair da Call", style=discord.ButtonStyle.danger, custom_id="stop_voice")
+        super().__init__(label="🔇 Sair da Call (WS)", style=discord.ButtonStyle.danger, custom_id="stop_voice_ws")
         self.cog = cog
         self.user_id = user_id
 
@@ -386,7 +386,7 @@ class StopVoiceButton(discord.ui.Button):
         if interaction.user.id != self.user_id:
             await interaction.response.send_message("❌ Não autorizado.", ephemeral=True)
             return
-        await self.cog.stop_user_voice(interaction)
+        await self.cog.stop_user_voice_ws(interaction)
 
 class BackButton(discord.ui.Button):
     def __init__(self, cog, user_id):
@@ -546,7 +546,7 @@ class CloneModal(discord.ui.Modal, title="Clonar Perfil"):
         ok, msg = await clone_profile(config['token'], self.target_id.value.strip())
         await interaction.response.send_message(f"{'✅' if ok else '❌'} {msg}", ephemeral=True)
 
-class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self-Bot via REST)"):
+class VoiceWSModal(discord.ui.Modal, title="Entrar em Call (WebSocket)"):
     guild_id = discord.ui.TextInput(label="ID do servidor", placeholder="123456789", required=True)
     channel_id = discord.ui.TextInput(label="ID do canal de voz", placeholder="987654321", required=True)
     hours = discord.ui.TextInput(label="Horas", placeholder="2", required=True)
@@ -574,7 +574,7 @@ class VoiceModal(discord.ui.Modal, title="Entrar em Call (Self-Bot via REST)"):
             return
         
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await self.cog.start_user_voice(interaction, gid, cid, hrs)
+        await self.cog.start_user_voice_ws(interaction, gid, cid, hrs)
 
 
 class ConfirmView(discord.ui.View):
