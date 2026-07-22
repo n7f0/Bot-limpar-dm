@@ -14,7 +14,7 @@ from utils.helpers import (
     clone_profile,
     get_user_id_from_token
 )
-from utils.voice import connect_user_voice, disconnect_user_voice
+from utils.voice_self import connect_user_voice, disconnect_user_voice
 
 logger = logging.getLogger(__name__)
 
