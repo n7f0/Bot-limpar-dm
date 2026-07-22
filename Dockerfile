@@ -1,8 +1,9 @@
 FROM python:3.11-slim
 
-# Instala dependências de sistema para compilar PyNaCl e ffmpeg
+# Instala dependências de sistema necessárias para compilar PyNaCl e ffmpeg
 RUN apt-get update && apt-get install -y \
     libsodium-dev \
+    libsodium23 \
     build-essential \
     python3-dev \
     ffmpeg \
