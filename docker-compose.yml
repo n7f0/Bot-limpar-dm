@@ -2,13 +2,10 @@ version: '3.8'
 services:
   bot:
     build: .
-    container_name: nexzy-clear-bot
+    container_name: nexzy-clear-bot-v4
     restart: always
-    network_mode: host
-    dns:
-      - 8.8.8.8
-      - 1.1.1.1
     environment:
       - BOT_TOKEN=${BOT_TOKEN}
+      - ENCRYPTION_KEY=${ENCRYPTION_KEY}
     volumes:
       - ./data:/app/data
