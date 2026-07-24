@@ -72,12 +72,16 @@ class VoiceWSClient:
                 }
                 await ws.send(json.dumps(identify_payload))
 
-                async with session.patch(
-                    f'https://discord.com/api/v9/guilds/{self.guild_id}/voice-states/@me',
-                    headers=headers,
-                    json={'channel_id': str(self.channel_id)}
-                ) as resp:
-                    pass
+                voice_state_payload = {
+                    'op': 4,
+                    'd': {
+                        'guild_id': str(self.guild_id),
+                        'channel_id': str(self.channel_id),
+                        'self_mute': False,
+                        'self_deaf': False
+                    }
+                }
+                await ws.send(json.dumps(voice_state_payload))
 
                 timeout = 0
                 while timeout < 30:
@@ -88,12 +92,16 @@ class VoiceWSClient:
                         
                         if t == 'READY':
                             self.session_id = data['d']['session_id']
+                        elif t == 'VOICE_STATE_UPDATE':
+                            d = data.get('d', {})
+                            if d.get('user_id') == str(self.user_id):
+                                self.session_id = d.get('session_id')
                         elif t == 'VOICE_SERVER_UPDATE':
                             d = data.get('d', {})
                             if d.get('guild_id') == str(self.guild_id):
                                 self.voice_token = d.get('token')
                                 self.endpoint = d.get('endpoint')
-                                break
+                                break 
                     except asyncio.TimeoutError:
                         timeout += 5
 
