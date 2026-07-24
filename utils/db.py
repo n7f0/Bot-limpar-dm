@@ -13,20 +13,57 @@ def get_connection():
 def init_db():
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute('''
+    cursor.execute("""
         CREATE TABLE IF NOT EXISTS users (
             user_id INTEGER PRIMARY KEY,
-            tokens TEXT,
-            default_token_index INTEGER DEFAULT 0,
-            chat_id INTEGER,
-            farm_chat_id INTEGER,
-            auto_farming INTEGER DEFAULT 0,
-            farm_interval INTEGER DEFAULT 120,
-            farm_message TEXT,
-            sleep_mode INTEGER DEFAULT 0,
+            tokens TEXT DEFAULT '[]',
+            active_token_index INTEGER DEFAULT 0,
+            channel_id INTEGER,
+            webhook_url TEXT,
+            stats_cleared INTEGER DEFAULT 0,
+            stats_farmed INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
-    ''')
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS persistent_tasks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER,
+            task_type TEXT,
+            payload TEXT,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def get_user_data(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT * FROM users WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        data = dict(row)
+        data['tokens'] = json.loads(data['tokens'])
+        return data
+    return {'tokens': [], 'active_token_index': 0, 'channel_id': None, 'webhook_url': None, 'stats_cleared': 0, 'stats_farmed': 0}
+
+def save_user_data(user_id: int, **kwargs):
+    data = get_user_data(user_id)
+    data.update(kwargs)
+    
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT OR REPLACE INTO users (
+            user_id, tokens, active_token_index, channel_id, webhook_url, stats_cleared, stats_farmed, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    """, (
+        user_id, json.dumps(data.get('tokens', [])), data.get('active_token_index', 0),
+        data.get('channel_id'), data.get('webhook_url'), data.get('stats_cleared', 0), data.get('stats_farmed', 0)
+    ))
     conn.commit()
     conn.close()
