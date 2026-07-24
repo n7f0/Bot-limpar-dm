@@ -3,8 +3,10 @@ import asyncio
 import logging
 import discord
 from discord.ext import commands
+from utils.db import init_db
+from utils.security import load_encryption_key
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)-8s %(name)s %(message)s')
 
 TOKEN = os.getenv('BOT_TOKEN')
 if not TOKEN:
@@ -15,7 +17,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.members = True
-intents.voice_states = True
 
 bot = commands.Bot(command_prefix='!', intents=intents)
 
@@ -29,24 +30,15 @@ async def load_cogs():
 @bot.event
 async def on_ready():
     logging.info(f"✅ Bot logado como {bot.user} (ID: {bot.user.id})")
-    # Sincroniza com o primeiro servidor (ou um específico)
     for guild in bot.guilds:
         try:
-            synced = await bot.tree.sync(guild=guild)
-            logging.info(f"✅ {len(synced)} comando(s) sincronizado(s) no servidor '{guild.name}' (ID: {guild.id})")
+            await bot.tree.sync(guild=guild)
         except Exception as e:
-            logging.error(f"❌ Erro ao sincronizar com {guild.name}: {e}")
-
-@bot.command(name="sync")
-@commands.is_owner()
-async def sync_command(ctx):
-    try:
-        synced = await bot.tree.sync(guild=ctx.guild)
-        await ctx.send(f"✅ {len(synced)} comando(s) sincronizado(s).")
-    except Exception as e:
-        await ctx.send(f"❌ Erro: {e}")
+            logging.error(f"Erro ao sincronizar {guild.name}: {e}")
 
 async def main():
+    load_encryption_key()
+    init_db()
     await load_cogs()
     await bot.start(TOKEN)
 
