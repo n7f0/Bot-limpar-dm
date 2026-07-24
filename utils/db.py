@@ -1,3 +1,4 @@
+# utils/db.py (modificado)
 import sqlite3
 import os
 import json
@@ -23,7 +24,15 @@ def init_db():
             stats_cleared INTEGER DEFAULT 0,
             stats_farmed INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            presence_type INTEGER DEFAULT 0,
+            presence_name TEXT DEFAULT '',
+            presence_state TEXT DEFAULT '',
+            presence_url TEXT DEFAULT '',
+            presence_large_image TEXT DEFAULT '',
+            presence_large_text TEXT DEFAULT '',
+            presence_small_image TEXT DEFAULT '',
+            presence_small_text TEXT DEFAULT ''
         )
     """)
     cursor.execute("""
@@ -49,7 +58,23 @@ def get_user_data(user_id: int):
         data = dict(row)
         data['tokens'] = json.loads(data['tokens'])
         return data
-    return {'tokens': [], 'active_token_index': 0, 'channel_id': None, 'webhook_url': None, 'stats_cleared': 0, 'stats_farmed': 0}
+    # retorna com defaults incluindo presence
+    return {
+        'tokens': [],
+        'active_token_index': 0,
+        'channel_id': None,
+        'webhook_url': None,
+        'stats_cleared': 0,
+        'stats_farmed': 0,
+        'presence_type': 0,
+        'presence_name': '',
+        'presence_state': '',
+        'presence_url': '',
+        'presence_large_image': '',
+        'presence_large_text': '',
+        'presence_small_image': '',
+        'presence_small_text': ''
+    }
 
 def save_user_data(user_id: int, **kwargs):
     data = get_user_data(user_id)
@@ -59,11 +84,26 @@ def save_user_data(user_id: int, **kwargs):
     cursor = conn.cursor()
     cursor.execute("""
         INSERT OR REPLACE INTO users (
-            user_id, tokens, active_token_index, channel_id, webhook_url, stats_cleared, stats_farmed, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            user_id, tokens, active_token_index, channel_id, webhook_url, stats_cleared, stats_farmed, updated_at,
+            presence_type, presence_name, presence_state, presence_url,
+            presence_large_image, presence_large_text, presence_small_image, presence_small_text
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (
-        user_id, json.dumps(data.get('tokens', [])), data.get('active_token_index', 0),
-        data.get('channel_id'), data.get('webhook_url'), data.get('stats_cleared', 0), data.get('stats_farmed', 0)
+        user_id,
+        json.dumps(data.get('tokens', [])),
+        data.get('active_token_index', 0),
+        data.get('channel_id'),
+        data.get('webhook_url'),
+        data.get('stats_cleared', 0),
+        data.get('stats_farmed', 0),
+        data.get('presence_type', 0),
+        data.get('presence_name', ''),
+        data.get('presence_state', ''),
+        data.get('presence_url', ''),
+        data.get('presence_large_image', ''),
+        data.get('presence_large_text', ''),
+        data.get('presence_small_image', ''),
+        data.get('presence_small_text', '')
     ))
     conn.commit()
     conn.close()
