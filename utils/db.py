@@ -67,3 +67,10 @@ def save_user_data(user_id: int, **kwargs):
     ))
     conn.commit()
     conn.close()
+
+def reset_user_data(user_id: int):
+    conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+    conn.commit()
+    conn.close()
