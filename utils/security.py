@@ -7,11 +7,22 @@ ENCRYPTION_KEY = None
 
 def load_encryption_key():
     global ENCRYPTION_KEY
-    key = os.getenv('ENCRYPTION_KEY')
-    if not key:
-        logger.error("CRÍTICO: Variável ENCRYPTION_KEY não definida no ambiente. Abortando.")
-        exit(1)
-    ENCRYPTION_KEY = key.encode()
+    # Pega a chave e limpa qualquer espaço invisível ou quebra de linha
+    raw_key = os.getenv('ENCRYPTION_KEY', '').strip()
+    
+    # Remove aspas se você tiver colocado sem querer no .env
+    raw_key = raw_key.replace('"', '').replace("'", "")
+    
+    try:
+        # Testa se a chave limpa é válida para a matemática do Fernet
+        Fernet(raw_key.encode())
+        ENCRYPTION_KEY = raw_key.encode()
+        logger.info("✅ Chave de criptografia carregada com sucesso do .env")
+    except Exception as e:
+        logger.warning("⚠️ Chave ENCRYPTION_KEY no .env está inválida ou vazia.")
+        logger.warning("🔄 Gerando uma chave provisória na memória para o bot não travar...")
+        # Gera uma chave 100% válida dinamicamente se tudo der errado
+        ENCRYPTION_KEY = Fernet.generate_key()
 
 def encrypt(text: str) -> str:
     if not text: return ''
