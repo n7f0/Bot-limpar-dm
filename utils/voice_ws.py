@@ -100,8 +100,12 @@ class VoiceWSClient:
                             d = data.get('d', {})
                             if d.get('guild_id') == str(self.guild_id):
                                 self.voice_token = d.get('token')
-                                self.endpoint = d.get('endpoint')
-                                break 
+                                endpoint_raw = d.get('endpoint')
+                                if endpoint_raw:
+                                    self.endpoint = endpoint_raw.split(':')[0]
+                        
+                        if self.session_id and self.voice_token and self.endpoint:
+                            break 
                     except asyncio.TimeoutError:
                         timeout += 5
 
