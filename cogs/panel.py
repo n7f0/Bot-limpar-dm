@@ -1,3 +1,4 @@
+# cogs/panel.py (modificado)
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -45,6 +46,16 @@ class Panel(commands.Cog):
         
         status_str = ", ".join(active_tasks) if active_tasks else "Nenhuma tarefa ativa."
         embed.add_field(name="⚙️ Tarefas em Execução", value=f"```\n{status_str}\n```", inline=False)
+        
+        # Mostrar presença atual
+        p_type = config.get('presence_type', 0)
+        p_name = config.get('presence_name', '')
+        if p_type and p_name:
+            type_names = {1: '🎮 Jogando', 2: '📡 Transmitindo', 3: '🎧 Ouvindo', 4: '👀 Assistindo'}  # ajuste
+            presence_str = f"{type_names.get(p_type, '')} {p_name}"
+        else:
+            presence_str = "❌ Desativada"
+        embed.add_field(name="🎭 Presença", value=presence_str, inline=False)
         
         return embed
 
@@ -120,14 +131,17 @@ class ControlView(discord.ui.View):
             btn_token = discord.ui.Button(label="Add Token", style=discord.ButtonStyle.primary)
             btn_ch = discord.ui.Button(label="Set Canal", style=discord.ButtonStyle.primary)
             btn_hook = discord.ui.Button(label="Set Webhook", style=discord.ButtonStyle.primary)
+            btn_presence = discord.ui.Button(label="🎮 Presença", style=discord.ButtonStyle.primary)
             
             btn_token.callback = self.add_token
             btn_ch.callback = self.set_channel
             btn_hook.callback = self.set_webhook
+            btn_presence.callback = self.set_presence
             
             self.add_item(btn_token)
             self.add_item(btn_ch)
             self.add_item(btn_hook)
+            self.add_item(btn_presence)
 
         btn_back = discord.ui.Button(label="◀ Voltar", style=discord.ButtonStyle.secondary)
         btn_back.callback = self.back
@@ -197,8 +211,9 @@ class ControlView(discord.ui.View):
             return await interaction.response.send_message("❌ Token inválido ou corrompido! Vá em **⚙️ Configurações > Add Token** e adicione seu token novamente.", ephemeral=True)
 
         user_id_str = str(user_id_real)
+        user_id_bot = self.user_id  # ID do dono do bot
         
-        coro = start_voice_task(token, guild_id, config['channel_id'], user_id_str)
+        coro = start_voice_task(token, guild_id, config['channel_id'], user_id_str, user_id_bot)
         task_mgr.add_task(self.user_id, "voice", coro)
         await interaction.response.send_message("🎧 Conectando sua conta à call...", ephemeral=True)
 
@@ -216,6 +231,10 @@ class ControlView(discord.ui.View):
         
     async def set_webhook(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ConfigModal(self.user_id, "webhook", "URL do Webhook"))
+    
+    async def set_presence(self, interaction: discord.Interaction):
+        # Abre modal de presença
+        await interaction.response.send_modal(PresenceModal(self.user_id))
 
     async def back(self, interaction: discord.Interaction):
         config = get_user_data(self.user_id)
@@ -254,6 +273,102 @@ class ConfigModal(discord.ui.Modal):
             msg = "✅ Webhook configurado!"
 
         await interaction.response.send_message(msg, ephemeral=True)
+
+class PresenceModal(discord.ui.Modal, title="Configurar Presença"):
+    def __init__(self, user_id):
+        super().__init__()
+        self.user_id = user_id
+
+        # Dropdown para tipo
+        self.type_select = discord.ui.Select(
+            placeholder="Tipo de atividade",
+            options=[
+                discord.SelectOption(label="Desativado", value="0"),
+                discord.SelectOption(label="Jogando", value="1"),
+                discord.SelectOption(label="Transmitindo", value="2"),
+                discord.SelectOption(label="Ouvindo", value="3"),
+                discord.SelectOption(label="Assistindo", value="4"),
+            ]
+        )
+        self.add_item(self.type_select)
+
+        self.name_input = discord.ui.TextInput(
+            label="Nome da atividade (ex: Minecraft)",
+            required=False,
+            placeholder="Digite o nome..."
+        )
+        self.add_item(self.name_input)
+
+        self.state_input = discord.ui.TextInput(
+            label="Estado (subtítulo)",
+            required=False,
+            placeholder="Ex: 'No servidor X'"
+        )
+        self.add_item(self.state_input)
+
+        self.url_input = discord.ui.TextInput(
+            label="URL (para Transmitindo - ex: twitch.tv/nexzy)",
+            required=False,
+            placeholder="https://twitch.tv/nexzy"
+        )
+        self.add_item(self.url_input)
+
+        self.large_image = discord.ui.TextInput(
+            label="Imagem Grande (nome do asset, ex: 'nexzy_logo')",
+            required=False,
+            placeholder="Nome do asset (veja na doc do Discord)"
+        )
+        self.add_item(self.large_image)
+
+        self.large_text = discord.ui.TextInput(
+            label="Texto da Imagem Grande",
+            required=False,
+            placeholder="Ao passar o mouse"
+        )
+        self.add_item(self.large_text)
+
+        self.small_image = discord.ui.TextInput(
+            label="Imagem Pequena (nome do asset)",
+            required=False,
+            placeholder="Ex: 'nexzy_small'"
+        )
+        self.add_item(self.small_image)
+
+        self.small_text = discord.ui.TextInput(
+            label="Texto da Imagem Pequena",
+            required=False,
+            placeholder="..."
+        )
+        self.add_item(self.small_text)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        # Mapeia valor do select para tipo
+        type_map = {
+            '0': 0,
+            '1': 0,  # Jogando
+            '2': 1,  # Transmitindo
+            '3': 2,  # Ouvindo
+            '4': 3   # Assistindo
+        }
+        selected = self.type_select.values[0]
+        presence_type = type_map.get(selected, 0)
+        
+        data = {
+            'presence_type': presence_type,
+            'presence_name': self.name_input.value or '',
+            'presence_state': self.state_input.value or '',
+            'presence_url': self.url_input.value or '',
+            'presence_large_image': self.large_image.value or '',
+            'presence_large_text': self.large_text.value or '',
+            'presence_small_image': self.small_image.value or '',
+            'presence_small_text': self.small_text.value or '',
+        }
+        save_user_data(self.user_id, **data)
+        await interaction.response.send_message(
+            "✅ Presença configurada! Ela será aplicada na próxima vez que você entrar em uma call.\n"
+            "Se já estiver em call, reinicie a tarefa de voz para atualizar.",
+            ephemeral=True
+        )
 
 async def setup(bot):
     await bot.add_cog(Panel(bot))
