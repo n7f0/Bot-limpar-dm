@@ -2,192 +2,149 @@ import asyncio
 import aiohttp
 import logging
 import random
-import os
 import time
 import base64
+import json
+from utils.db import save_user_data, get_user_data
 
 logger = logging.getLogger(__name__)
 
+def get_human_headers(token: str):
+    x_super = {
+        "os": "Windows",
+        "browser": "Chrome",
+        "device": "",
+        "system_locale": "pt-BR",
+        "browser_user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "browser_version": "120.0.0.0",
+        "os_version": "10",
+        "referrer": "",
+        "referring_domain": "",
+        "referring_domain_current": "",
+        "release_channel": "stable",
+        "client_build_number": 255273,
+        "client_event_source": None
+    }
+    encoded_props = base64.b64encode(json.dumps(x_super).encode()).decode()
+    return {
+        'Authorization': token,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'X-Super-Properties': encoded_props,
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+
+async def send_webhook_notification(user_id: int, title: str, description: str, color: int = 0x00ff00):
+    data = get_user_data(user_id)
+    url = data.get('webhook_url')
+    if not url: return
+
+    embed = {
+        "title": title,
+        "description": description,
+        "color": color,
+        "timestamp": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
+    }
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.post(url, json={"embeds": [embed]})
+        except Exception as e:
+            logger.error(f"Erro ao enviar webhook: {e}")
+
 async def get_user_id_from_token(token: str) -> str:
-    headers = {'Authorization': token}
+    headers = get_human_headers(token)
     async with aiohttp.ClientSession() as session:
         try:
             async with session.get('https://discord.com/api/v9/users/@me', headers=headers) as resp:
                 if resp.status == 200:
                     data = await resp.json()
                     return data['id']
-        except:
-            pass
+        except Exception as e:
+            logger.error(f"Erro token check: {e}")
     return None
 
-async def stealth_clear(token: str, channel_id: int, limit: int = 150):
+async def stealth_clear(token: str, channel_id: int, user_id_bot: int, limit: int = 150):
     user_id = await get_user_id_from_token(token)
-    if not user_id:
-        return 0, 0
+    if not user_id: return 0, 0
 
-    headers = {'Authorization': token}
+    headers = get_human_headers(token)
     deleted = 0
     failed = 0
-    batch_size = 20
-    total_limit = limit
+    db_data = get_user_data(user_id_bot)
 
-    async with aiohttp.ClientSession() as session:
-        url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100'
-        while deleted < total_limit:
-            try:
+    try:
+        async with aiohttp.ClientSession() as session:
+            url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100'
+            while deleted < limit:
                 async with session.get(url, headers=headers) as resp:
                     if resp.status == 429:
                         retry = (await resp.json()).get('retry_after', 5)
-                        await asyncio.sleep(retry + 1)
+                        logger.warning(f"Rate limit hit! Sleeping for {retry}s")
+                        await asyncio.sleep(retry + random.uniform(1.0, 3.0))
                         continue
-                    if resp.status != 200:
-                        break
+                    if resp.status != 200: break
                     messages = await resp.json()
-                    if not messages:
-                        break
+                    if not messages: break
 
-                    own_msgs = [m for m in messages if m['author']['id'] == user_id]
-                    if not own_msgs:
-                        if len(messages) < 100:
-                            break
-                        last_id = messages[-1]['id']
-                        url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100&before={last_id}'
-                        continue
+                own_msgs = [m for m in messages if m['author']['id'] == user_id]
+                if not own_msgs:
+                    if len(messages) < 100: break
+                    url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100&before={messages[-1]["id"]}'
+                    continue
 
-                    for i in range(0, min(len(own_msgs), total_limit - deleted), batch_size):
-                        batch = own_msgs[i:i+batch_size]
-                        for msg in batch:
-                            del_url = f'https://discord.com/api/v9/channels/{channel_id}/messages/{msg["id"]}'
-                            async with session.delete(del_url, headers=headers) as del_resp:
-                                if del_resp.status == 204:
-                                    deleted += 1
-                                elif del_resp.status == 429:
-                                    retry = (await del_resp.json()).get('retry_after', 2)
-                                    await asyncio.sleep(retry + 0.5)
-                                else:
-                                    failed += 1
-                            await asyncio.sleep(random.uniform(0.8, 1.8))
+                for msg in own_msgs:
+                    if deleted >= limit: break
+                    del_url = f'https://discord.com/api/v9/channels/{channel_id}/messages/{msg["id"]}'
+                    
+                    async with session.delete(del_url, headers=headers) as del_resp:
+                        if del_resp.status == 204:
+                            deleted += 1
+                            db_data['stats_cleared'] += 1
+                        elif del_resp.status == 429:
+                            retry = (await del_resp.json()).get('retry_after', 3)
+                            await asyncio.sleep(retry + random.uniform(2.0, 5.0))
+                        else:
+                            failed += 1
+                    
+                    await asyncio.sleep(random.uniform(1.2, 3.5))
+                
+                save_user_data(user_id_bot, stats_cleared=db_data['stats_cleared'])
 
-                        if deleted < total_limit:
-                            await asyncio.sleep(random.uniform(15, 35))
+                if len(messages) < 100: break
+                url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100&before={messages[-1]["id"]}'
+                
+    except asyncio.CancelledError:
+        logger.info("Task de limpeza cancelada pelo usuário.")
+        await send_webhook_notification(user_id_bot, "🧹 Limpeza Parada", f"Limpou {deleted} mensagens.", 0xff0000)
+        raise
 
-                    if len(messages) < 100:
-                        break
-                    last_id = messages[-1]['id']
-                    url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100&before={last_id}'
-
-            except Exception as e:
-                logger.error(f"Erro no stealth clear: {e}")
-                break
-
+    await send_webhook_notification(user_id_bot, "✅ Limpeza Concluída", f"Total apagado: {deleted}", 0x00ff00)
     return deleted, failed
 
-async def stealth_backup(token: str, channel_id: int, limit: int = 3000):
-    user_id = await get_user_id_from_token(token)
-    if not user_id:
-        return None, 0
+async def auto_farm(token: str, channel_id: int, user_id_bot: int, messages: list, interval_min: int = 15):
+    headers = get_human_headers(token)
+    headers['Content-Type'] = 'application/json'
+    db_data = get_user_data(user_id_bot)
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            while True:
+                for msg in messages:
+                    typing_url = f'https://discord.com/api/v9/channels/{channel_id}/typing'
+                    await session.post(typing_url, headers=headers)
+                    await asyncio.sleep(random.uniform(1.5, 4.0)) 
+                    
+                    payload = {'content': msg}
+                    send_url = f'https://discord.com/api/v9/channels/{channel_id}/messages'
+                    async with session.post(send_url, headers=headers, json=payload) as resp:
+                        if resp.status == 200:
+                            db_data['stats_farmed'] += 1
+                            save_user_data(user_id_bot, stats_farmed=db_data['stats_farmed'])
+                    await asyncio.sleep(random.uniform(3, 7))
 
-    headers = {'Authorization': token}
-    messages = []
-    url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100'
-
-    async with aiohttp.ClientSession() as session:
-        while len(messages) < limit:
-            try:
-                async with session.get(url, headers=headers) as resp:
-                    if resp.status == 429:
-                        retry = (await resp.json()).get('retry_after', 5)
-                        await asyncio.sleep(retry + 1)
-                        continue
-                    if resp.status != 200:
-                        break
-                    data = await resp.json()
-                    if not data:
-                        break
-                    messages.extend(data)
-                    for msg in data:
-                        await asyncio.sleep(random.uniform(0.2, 0.6))
-                    if random.random() < 0.3:
-                        emojis = ['👀', '📖', '✅', '📌', '🔍']
-                        for msg in random.sample(data, min(3, len(data))):
-                            react_url = f'https://discord.com/api/v9/channels/{channel_id}/messages/{msg["id"]}/reactions/{random.choice(emojis)}/%40me'
-                            async with session.put(react_url, headers=headers) as r:
-                                pass
-                    if len(data) < 100:
-                        break
-                    last_id = data[-1]['id']
-                    url = f'https://discord.com/api/v9/channels/{channel_id}/messages?limit=100&before={last_id}'
-            except:
-                break
-
-    filename = f'/app/data/backup_{channel_id}_{int(time.time())}.txt'
-    os.makedirs(os.path.dirname(filename), exist_ok=True)
-    with open(filename, 'w', encoding='utf-8') as f:
-        for msg in messages:
-            f.write(f"[{msg['timestamp']}] {msg['author']['username']}: {msg.get('content', '')}\n")
-    return filename, len(messages)
-
-async def schedule_message(token: str, channel_id: int, content: str, minutes: int):
-    await asyncio.sleep(minutes * 60)
-    headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    async with aiohttp.ClientSession() as session:
-        typing_url = f'https://discord.com/api/v9/channels/{channel_id}/typing'
-        await session.post(typing_url, headers=headers)
-        await asyncio.sleep(random.uniform(1.0, 3.0))
-        payload = {'content': content}
-        send_url = f'https://discord.com/api/v9/channels/{channel_id}/messages'
-        async with session.post(send_url, headers=headers, json=payload) as resp:
-            return resp.status == 200
-
-async def auto_farm(token: str, channel_id: str, messages: list, interval_min: int = 15, jitter: int = 5, repeat_count: int = 0):
-    headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    async with aiohttp.ClientSession() as session:
-        executed = 0
-        while True:
-            if repeat_count > 0 and executed >= repeat_count:
-                break
-
-            for msg in messages:
-                typing_url = f'https://discord.com/api/v9/channels/{channel_id}/typing'
-                await session.post(typing_url, headers=headers)
-                await asyncio.sleep(random.uniform(1.0, 2.5))
-                payload = {'content': msg}
-                send_url = f'https://discord.com/api/v9/channels/{channel_id}/messages'
-                async with session.post(send_url, headers=headers, json=payload) as resp:
-                    pass
-                await asyncio.sleep(random.uniform(2, 5))
-
-            executed += 1
-            if repeat_count > 0 and executed >= repeat_count:
-                break
-
-            base_interval = max(1, interval_min)
-            jitter_seconds = random.randint(0, jitter * 60)
-            await asyncio.sleep(base_interval * 60 + jitter_seconds)
-
-async def clone_profile(token: str, target_user_id: str):
-    headers = {'Authorization': token, 'Content-Type': 'application/json'}
-    async with aiohttp.ClientSession() as session:
-        async with session.get(f'https://discord.com/api/v9/users/{target_user_id}', headers=headers) as resp:
-            if resp.status != 200:
-                return False, "Usuário não encontrado"
-            target_data = await resp.json()
-
-        avatar_hash = target_data.get('avatar')
-        if avatar_hash:
-            avatar_url = f"https://cdn.discordapp.com/avatars/{target_user_id}/{avatar_hash}.png?size=128"
-            async with session.get(avatar_url) as img_resp:
-                if img_resp.status == 200:
-                    image_data = await img_resp.read()
-                    b64 = base64.b64encode(image_data).decode('utf-8')
-                    payload = {'avatar': f'data:image/png;base64,{b64}'}
-                    async with session.patch('https://discord.com/api/v9/users/@me', headers=headers, json=payload) as patch:
-                        pass
-
-        bio = target_data.get('bio', '')
-        if bio:
-            payload = {'bio': bio}
-            async with session.patch('https://discord.com/api/v9/users/@me/profile', headers=headers, json=payload) as patch:
-                pass
-
-        return True, "Perfil clonado (avatar e biografia)"
+                base_interval = interval_min * 60
+                jitter = random.randint(0, int(base_interval * 0.2)) 
+                await asyncio.sleep(base_interval + jitter)
+    except asyncio.CancelledError:
+        logger.info("Task de farm cancelada pelo usuário.")
+        await send_webhook_notification(user_id_bot, "🛑 Farm Parado", f"Status: Paralisado.", 0xff0000)
+        raise
