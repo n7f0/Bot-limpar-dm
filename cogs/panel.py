@@ -92,8 +92,6 @@ class ControlView(discord.ui.View):
         self.user_id = user_id
         self.module = module
         
-        config = get_user_data(user_id)
-        
         if module == "stealth":
             btn_start = discord.ui.Button(label="Iniciar Limpeza", style=discord.ButtonStyle.success)
             btn_stop = discord.ui.Button(label="Parar Limpeza", style=discord.ButtonStyle.danger)
@@ -194,7 +192,11 @@ class ControlView(discord.ui.View):
         if not guild_id:
             return await interaction.response.send_message("❌ Use este comando dentro do servidor onde deseja conectar na call.", ephemeral=True)
 
-        user_id_str = str(await get_user_id_from_token(token))
+        user_id_real = await get_user_id_from_token(token)
+        if not user_id_real:
+            return await interaction.response.send_message("❌ Token inválido ou corrompido! Vá em **⚙️ Configurações > Add Token** e adicione seu token novamente.", ephemeral=True)
+
+        user_id_str = str(user_id_real)
         
         coro = start_voice_task(token, guild_id, config['channel_id'], user_id_str)
         task_mgr.add_task(self.user_id, "voice", coro)
