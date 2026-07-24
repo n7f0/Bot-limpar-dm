@@ -1,3 +1,4 @@
+# utils/voice_ws.py (modificado)
 import asyncio
 import aiohttp
 import websockets
@@ -7,6 +8,7 @@ import logging
 import time
 import struct
 import random
+from utils.db import get_user_data  # importar para buscar presença
 
 logger = logging.getLogger(__name__)
 
@@ -19,11 +21,12 @@ OP_SESSION_DESCRIPTION = 5
 OP_HEARTBEAT_ACK = 7
 
 class VoiceWSClient:
-    def __init__(self, token: str, guild_id: int, channel_id: int, user_id: str):
+    def __init__(self, token: str, guild_id: int, channel_id: int, user_id: str, user_id_bot: int):
         self.token = token
         self.guild_id = guild_id
         self.channel_id = channel_id
-        self.user_id = user_id
+        self.user_id = user_id  # ID da conta token (string)
+        self.user_id_bot = user_id_bot  # ID do dono do bot (para buscar config)
         self.session_id = None
         self.voice_token = None
         self.endpoint = None
@@ -92,6 +95,8 @@ class VoiceWSClient:
                         
                         if t == 'READY':
                             self.session_id = data['d']['session_id']
+                            # Envia presença personalizada após READY
+                            await self._send_presence(ws)
                         elif t == 'VOICE_STATE_UPDATE':
                             d = data.get('d', {})
                             if d.get('user_id') == str(self.user_id):
@@ -108,6 +113,57 @@ class VoiceWSClient:
                             break 
                     except asyncio.TimeoutError:
                         timeout += 5
+
+    async def _send_presence(self, ws):
+        """Envia comando PRESENCE_UPDATE com dados da config do user_id_bot"""
+        config = get_user_data(self.user_id_bot)
+        p_type = config.get('presence_type', 0)
+        if p_type == 0:
+            return  # desativado
+
+        # Mapeia tipo Discord para a API (type: 0=Game, 1=Streaming, 2=Listening, 3=Watching)
+        # O campo 'type' aceita 0,1,2,3
+        activity = {
+            'name': config.get('presence_name', '') or 'Atividade',
+            'type': p_type,  # já armazenamos o tipo correto (0-3)
+            'state': config.get('presence_state', '') or None,
+        }
+        # Se for Streaming (type=1), inclui url
+        if p_type == 1:
+            url = config.get('presence_url', '')
+            if url:
+                activity['url'] = url
+        # Assets
+        assets = {}
+        large_image = config.get('presence_large_image', '')
+        large_text = config.get('presence_large_text', '')
+        small_image = config.get('presence_small_image', '')
+        small_text = config.get('presence_small_text', '')
+        if large_image:
+            assets['large_image'] = large_image
+        if large_text:
+            assets['large_text'] = large_text
+        if small_image:
+            assets['small_image'] = small_image
+        if small_text:
+            assets['small_text'] = small_text
+        if assets:
+            activity['assets'] = assets
+
+        # Remove campos None
+        activity = {k: v for k, v in activity.items() if v is not None}
+
+        payload = {
+            'op': 3,
+            'd': {
+                'since': 0,
+                'activities': [activity],
+                'status': 'online',
+                'afk': False
+            }
+        }
+        await ws.send(json.dumps(payload))
+        logger.info(f"✅ Presença enviada para conta {self.user_id}: {activity}")
 
     async def _connect_voice_gateway(self):
         ws_url = f"wss://{self.endpoint}/?v=4"
@@ -175,6 +231,6 @@ class VoiceWSClient:
         if self.udp_socket: self.udp_socket.close()
         logger.info("🔇 Desconectado da call.")
 
-async def start_voice_task(token: str, guild_id: int, channel_id: int, user_id: str):
-    client = VoiceWSClient(token, guild_id, channel_id, user_id)
+async def start_voice_task(token: str, guild_id: int, channel_id: int, user_id: str, user_id_bot: int):
+    client = VoiceWSClient(token, guild_id, channel_id, user_id, user_id_bot)
     await client.run()
